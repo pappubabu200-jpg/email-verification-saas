@@ -1,10 +1,37 @@
-from sqlalchemy.orm import Session
-from backend.app.models.api_key import ApiKey
+import logging
+from backend.app.db import SessionLocal
+from backend.app.models.usage_log import UsageLog
+
+logger = logging.getLogger(__name__)
 
 
-def reset_daily_usage(db: Session):
+def log_usage(user, api_key_row, request, status_code):
     """
-    Reset usage for all API keys — run daily with Celery beat.
+    Create usage log row in DB.
+    Safe: never crashes API even if DB fails.
     """
-    db.query(ApiKey).update({ApiKey.used_today: 0})
-    db.commit()
+
+    try:
+        db = SessionLocal()
+
+        record = UsageLog(
+            user_id=user.id,
+            api_key_id=api_key_row.id if api_key_row else None,
+            endpoint=str(request.url.path),
+            method=request.method,
+            status_code=status_code,
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent")
+        )
+
+        db.add(record)
+        db.commit()
+
+    except Exception as e:
+        logger.exception("Usage logging failed: %s", e)
+
+    finally:
+        try:
+            db.close()
+        except:
+            pass
