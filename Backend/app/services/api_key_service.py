@@ -135,4 +135,28 @@ def _redis_usage_key(api_key_id: int) -> str:
     return f"usage:{api_key_id}:{today}"
 
 
+def redis_increment_usage(api_key_row, amount: int = 1):
+    """
+    Atomic Redis increment with midnight TTL auto-expire.
+    """
+    if not REDIS:
+        return None  # fallback to DB usage
+
+    key = _redis_usage_key(api_key_row.id)
+
+    # INCR
+    new_val = REDIS.incrby(key, amount)
+
+    # Set TTL if new key was created
+    if new_val == amount:
+        # Expire at next midnight
+        now = datetime.utcnow()
+        tomorrow = now + timedelta(days=1)
+        midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day)
+        ttl_seconds = int((midnight - now).total_seconds())
+        REDIS.expire(key, ttl_seconds)
+
+    return new_val
+
+
 
