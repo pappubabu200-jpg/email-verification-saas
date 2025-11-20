@@ -11,11 +11,7 @@ from backend.app.models.decision_maker import DecisionMaker
 logger = logging.getLogger(__name__)
 
 def normalize_person_record(raw: Dict[str, Any], source: str, domain: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Convert a raw person dict from PDL or Apollo into our normalized format.
-    """
-    # best-effort parsing (fields vary by provider)
-    first = raw.get("first_name") or raw.get("given_name") or raw.get("name") and raw.get("name").split(" ")[0]
+    first = raw.get("first_name") or raw.get("given_name") or (raw.get("name") and raw.get("name").split(" ")[0])
     last = raw.get("last_name") or raw.get("family_name") or ""
     title = raw.get("title") or raw.get("job_title") or raw.get("role") or ""
     email = raw.get("email") or raw.get("work_email") or raw.get("contact_email")
@@ -32,14 +28,10 @@ def normalize_person_record(raw: Dict[str, Any], source: str, domain: Optional[s
         "raw": raw,
     }
 
-def search_decision_makers(domain: Optional[str] = None, company_name: Optional[str] = None, max_results: int = 25, use_cache: bool = True) -> List[Dict[str, Any]]:
+def search_decision_makers(domain: Optional[str] = None, company_name: Optional[str] = None,
+                           max_results: int = 25, use_cache: bool = True, caller_api_key: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    High-level function:
-    - tries cache
-    - queries PDL & Apollo
-    - generates email guesses where missing
-    - verifies guessed emails (lightweight)
-    - persists top results in DB (optional)
+    Runs PDL/Apollo queries and forwards caller_api_key down to clients for per-api-key limiting.
     """
     if not domain and not company_name:
         return []
@@ -53,45 +45,45 @@ def search_decision_makers(domain: Optional[str] = None, company_name: Optional[
 
     results: List[Dict[str, Any]] = []
 
-    # 1) People Data Labs
+    # 1) People Data Labs (pass caller_api_key so limiter can use per-api-key rules)
     if domain:
-        pdl_people = pdl_search_by_domain(domain, limit=max_results)
+        try:
+            pdl_people = pdl_search_by_domain(domain, limit=max_results, caller_api_key=caller_api_key)
+        except Exception as e:
+            logger.debug("pdl search error: %s", e)
+            pdl_people = []
         for p in pdl_people:
             norm = normalize_person_record(p, "pdl", domain=domain)
             results.append(norm)
 
-    # 2) Apollo
+    # 2) Apollo (pass caller_api_key)
     try:
-        ap_people = apollo_search_people(domain or company_name, limit=max_results)
+        ap_people = apollo_search_people(domain or company_name, limit=max_results, caller_api_key=caller_api_key)
         for p in ap_people:
             norm = normalize_person_record(p, "apollo", domain=domain)
             results.append(norm)
     except Exception:
         logger.debug("apollo search skipped or failed")
 
-    # 3) Deduplicate by (first,last,title) or email
+    # dedupe & pattern guessing & verify logic unchanged (copy from previous implementation)
     dedup = {}
     final = []
     for r in results:
-        key = (r.get("email") or "").lower() or ( (r.get("first_name") or "").lower() + "|" + (r.get("last_name") or "").lower() + "|" + (r.get("title") or "").lower())
+        key = (r.get("email") or "").lower() or (((r.get("first_name") or "").lower()) + "|" + ((r.get("last_name") or "").lower()) + "|" + ((r.get("title") or "").lower()))
         if key in dedup:
             continue
         dedup[key] = True
         final.append(r)
 
-    # 4) If no emails, generate with pattern engine for top N
     out = []
     for person in final[:max_results]:
         if person.get("email"):
-            # optionally verify quickly (lightweight)
             person["verified_result"] = verify_email_sync(person["email"])
             person["verified"] = person["verified_result"].get("status") == "valid"
         else:
-            # generate candidates
             patterns = common_patterns(person.get("first_name"), person.get("last_name"), domain)
             guesses = []
             for cand in patterns:
-                # verify guess with verification engine
                 vr = verify_email_sync(cand)
                 guesses.append({"email": cand, "result": vr})
                 if vr.get("status") == "valid":
@@ -102,7 +94,6 @@ def search_decision_makers(domain: Optional[str] = None, company_name: Optional[
             person["guesses"] = guesses
         out.append(person)
 
-    # 5) Persist top N results to DB (optional)
     try:
         db = SessionLocal()
         for p in out[:50]:
@@ -131,6 +122,5 @@ def search_decision_makers(domain: Optional[str] = None, company_name: Optional[
         except Exception:
             pass
 
-    # 6) Cache the results
-    set_cached(query_key, {"results": out}, ttl=60 * 60 * 24)  # 24h
+    set_cached(query_key, {"results": out}, ttl=60 * 60 * 24)
     return out
