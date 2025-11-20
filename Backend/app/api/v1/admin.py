@@ -402,3 +402,30 @@ def admin_delete_decision_maker(dm_id: int, admin = Depends(get_current_admin)):
 
     finally:
         db.close()
+
+
+from backend.app.models.api_key import ApiKey
+
+@router.get("/api-keys")
+def admin_list_api_keys(limit: int = 100, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        rows = db.query(ApiKey).order_by(ApiKey.created_at.desc()).limit(limit).all()
+        return [{"id": r.id, "key": r.key, "user_id": r.user_id, "active": r.active, "daily_limit": r.daily_limit, "rate_limit_per_sec": r.rate_limit_per_sec} for r in rows]
+    finally:
+        db.close()
+
+@router.post("/api-keys/{api_key_id}/update-rate")
+def admin_update_api_key_rate(api_key_id: int, rate_limit_per_sec: int, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        ak = db.query(ApiKey).get(api_key_id)
+        if not ak:
+            raise HTTPException(status_code=404, detail="api_key_not_found")
+        ak.rate_limit_per_sec = int(rate_limit_per_sec)
+        db.commit()
+        return {"id": ak.id, "rate_limit_per_sec": ak.rate_limit_per_sec}
+    finally:
+        db.close()
+
+    
