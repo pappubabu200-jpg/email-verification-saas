@@ -1,28 +1,74 @@
-from backend.app.services.api_key_service import get_user_from_api_key
+# backend/app/middleware/api_key_guard.py
+from fastapi import Request, HTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.responses import JSONResponse
 
-user, key_row = get_user_from_api_key(api_key)
-
-if not user:
-    return JSONResponse(
-        status_code=401,
-        content={"detail": "Invalid or inactive API key"}
-    )
-
-# attach to request.state
-request.state.api_user = user
-request.state.api_key_row = key_row
+from backend.app.db import SessionLocal
+from backend.app.services.api_key_service import get_api_key, increment_usage
 from backend.app.services.usage_service import log_usage
 
-response = await call_next(request)
+class ApiKeyGuard(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        api_key = request.headers.get("X-API-Key")
 
-# log usage after request is processed
-user = getattr(request.state, "api_user", None)
-key_row = getattr(request.state, "api_key_row", None)
+        if api_key:
+            db = SessionLocal()
+            try:
+                try:
+                    ak = get_api_key(db, api_key)  # may raise HTTPException(401) or 403
+                except HTTPException as e:
+                    return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
 
-if user:
+                # Attach to request.state
+                request.state.api_user_id = ak.user_id
+                request.state.api_key = api_key
+                request.state.api_key_row = ak
+
+                # Enforce per-key daily usage (atomic increment + check)
+                try:
+                    increment_usage(db, ak, amount=1)
+                except HTTPException as e:
+                    # e.g., daily limit exceeded
+                    return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
+                except Exception as e:
+                    # DB or other problem; permissive: allow but log
+                    # (we do not want to block customers when DB is flaky)
+                    pass
+
+            finally:
+                db.close()
+
+            # call the request
+            response = await call_next(request)
+
+            # Log usage asynchronously (best-effort)
+            try:
+                user = getattr(request.state, "api_user", None)
+                # if middleware didn't set user object, we will leave it None; log_usage expects user object
+                # but our earlier log_usage uses user.id; to avoid issues, we pass ak.user_id via a light wrapper
+                log_usage_wrapper(request, response.status_code, ak)
+            except Exception:
+                pass
+
+            return response
+
+        # No API key - proceed normally (JWT auth will be enforced by endpoints)
+        response = await call_next(request)
+        return response
+
+
+def log_usage_wrapper(request: Request, status_code: int, ak):
+    """
+    Simple wrapper to call usage_service.log_usage with DB user object minimal shape.
+    This avoids forcing the middleware to load full User object here.
+    """
     try:
-        log_usage(user, key_row, request, response.status_code)
+        from backend.app.services.usage_service import log_usage
+        # create a tiny object with id property to satisfy log_usage signature
+        class TinyUser:
+            def __init__(self, uid):
+                self.id = uid
+        user_obj = TinyUser(ak.user_id)
+        log_usage(user_obj, ak, request, status_code)
     except Exception:
         pass
-
-return response
