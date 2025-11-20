@@ -501,6 +501,11 @@ def admin_reset_api_key_usage(api_key_id: int, admin = Depends(get_current_admin
     finally:
         db.close()
 
+from backend.app.services.api_key_service import reset_all_api_keys_usage
 
+@router.post("/api-keys/reset-all", summary="Reset usage for ALL API keys")
+def admin_reset_all(admin=Depends(get_current_admin)):
+    reset_all_api_keys_usage()  # DB reset
+    return {"status": "ok", "message": "all api keys usage reset"}
 
 
