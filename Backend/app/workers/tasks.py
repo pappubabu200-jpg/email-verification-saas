@@ -21,3 +21,36 @@ def verify_email_task(self, email: str, context: dict = None):
     result["job_id"] = job_id
 
     return result
+
+from backend.app.celery_app import celery_app
+import redis
+import json
+
+try:
+    REDIS = redis.from_url("redis://redis:6379/0")
+except:
+    REDIS = None
+
+@celery_app.task(bind=True)
+def verify_email_task(self, email: str, context: dict):
+    """
+    Each verification increments Redis counters:
+    job:{id}:done → +1
+    on failure → job:{id}:error → +1
+    """
+    from backend.app.services.verification_engine import verify_email_sync
+
+    job_id = context.get("job_id")
+    reservation_id = context.get("reservation_id")
+    user_id = context.get("user_id")
+
+    try:
+        result = verify_email_sync(email, user_id=user_id)
+        if REDIS:
+            REDIS.incr(f"job:{job_id}:done")
+        return result
+    except Exception:
+        if REDIS:
+            REDIS.incr(f"job:{job_id}:error")
+        raise
+        
