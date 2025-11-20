@@ -53,3 +53,21 @@ def increment_usage(db: Session, key_id: int):
     if api_key.used_today > api_key.daily_limit:
         raise HTTPException(status_code=429, detail="api_key_daily_limit_reached")
     db.commit()
+
+
+def create_api_key(db: Session, user_id: int, name: str = None, daily_limit: int = 5000, rate_limit_per_sec: int = 0) -> ApiKey:
+    key = generate_api_key()
+
+    api_key = ApiKey(
+        user_id=user_id,
+        key=key,
+        name=name,
+        active=True,
+        used_today=0,
+        daily_limit=daily_limit,
+        rate_limit_per_sec=rate_limit_per_sec,
+    )
+    db.add(api_key)
+    db.commit()
+    db.refresh(api_key)
+    return api_key
