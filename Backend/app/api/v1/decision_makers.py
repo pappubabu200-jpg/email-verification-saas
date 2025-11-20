@@ -128,5 +128,26 @@ def search(
             "limit": limit
         }
                }
+from fastapi import Depends, APIRouter, Request
+from backend.app.services.decision_maker_service import search_decision_makers
+
+router = APIRouter(prefix="/api/v1/decision-makers")
+
+@router.post("/find")
+def find_dm(payload: dict, request: Request):
+    domain = payload.get("domain")
+    company = payload.get("company")
+
+    api_key = None
+    if hasattr(request.state, "api_key_row") and request.state.api_key_row:
+        api_key = request.state.api_key_row.key
+
+    return search_decision_makers(
+        domain=domain,
+        company_name=company,
+        max_results=25,
+        caller_api_key=api_key,
+    )
+
 
 
