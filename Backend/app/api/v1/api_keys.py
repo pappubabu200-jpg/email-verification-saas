@@ -33,3 +33,11 @@ def list_keys(current_user=Depends(get_current_user), db: Session = Depends(get_
 def revoke_key(key_id: int, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
     deactivate_api_key(db, key_id, current_user.id)
     return {"status": "revoked"}
+
+
+
+@router.post("/create")
+def create_key(name: str = None, daily_limit: int = 5000, rate_limit_per_sec: int = 0, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    key = create_api_key(db, current_user.id, name, daily_limit=daily_limit, rate_limit_per_sec=rate_limit_per_sec)
+    return {"id": key.id, "key": key.key, "name": key.name, "daily_limit": key.daily_limit, "rate_limit_per_sec": key.rate_limit_per_sec}
+
