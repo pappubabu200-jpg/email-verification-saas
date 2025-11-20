@@ -15,3 +15,15 @@ async def upload_csv(file: UploadFile = File(...), current_user = Depends(get_cu
     job_id = f"job-{uuid.uuid4().hex[:12]}"
     res = submit_bulk_job(getattr(current_user, "id", None), job_id, emails)
     return {"job_id": job_id, "queued": res.get("queued", 0)}
+
+
+@router.post("/upload")
+async def upload_csv(file: UploadFile = File(...), request: Request, current_user = Depends(get_current_user)):
+    content = await file.read()
+    emails = extract_emails_from_csv_bytes(content)
+
+    user_id = getattr(request.state, "api_user_id", current_user.id)
+
+    job_id = f"job-{uuid.uuid4().hex[:12]}"
+    res = submit_bulk_job(user_id, job_id, emails)
+    return {"job_id": job_id, "queued": res["queued"]}
