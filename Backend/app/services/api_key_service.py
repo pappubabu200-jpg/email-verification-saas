@@ -130,3 +130,9 @@ try:
 except Exception:
     REDIS = None
 
+def _redis_usage_key(api_key_id: int) -> str:
+    today = datetime.utcnow().strftime("%Y%m%d")
+    return f"usage:{api_key_id}:{today}"
+
+
+
