@@ -119,3 +119,14 @@ def reset_all_api_keys_usage():
         logger.exception("reset_all_api_keys_usage failed: %s", e)
     finally:
         db.close()
+
+# NEW: Redis usage counters
+import redis
+from datetime import datetime, timedelta
+from backend.app.config import settings
+
+try:
+    REDIS = redis.from_url(settings.REDIS_URL)
+except Exception:
+    REDIS = None
+
