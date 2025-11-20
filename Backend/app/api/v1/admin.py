@@ -458,4 +458,49 @@ def admin_usage(limit: int = 100, admin=Depends(get_current_admin)):
 
     return out
 
+# inside admin.py (append)
+
+from backend.app.models.api_key import ApiKey
+from backend.app.services.api_key_service import set_api_key_active, reset_api_key_usage
+
+@router.get("/api-keys/{api_key_id}/usage")
+def admin_get_api_key_usage(api_key_id: int, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        ak = db.query(ApiKey).get(api_key_id)
+        if not ak:
+            raise HTTPException(status_code=404, detail="api_key_not_found")
+        return {"id": ak.id, "key": ak.key, "user_id": ak.user_id, "daily_limit": ak.daily_limit, "used_today": ak.used_today, "rate_limit_per_sec": ak.rate_limit_per_sec, "active": ak.active}
+    finally:
+        db.close()
+
+@router.post("/api-keys/{api_key_id}/disable")
+def admin_disable_api_key(api_key_id: int, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        ak = set_api_key_active(db, api_key_id, active=False)
+        return {"id": ak.id, "active": ak.active}
+    finally:
+        db.close()
+
+@router.post("/api-keys/{api_key_id}/enable")
+def admin_enable_api_key(api_key_id: int, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        ak = set_api_key_active(db, api_key_id, active=True)
+        return {"id": ak.id, "active": ak.active}
+    finally:
+        db.close()
+
+@router.post("/api-keys/{api_key_id}/reset-usage")
+def admin_reset_api_key_usage(api_key_id: int, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        ak = reset_api_key_usage(db, api_key_id)
+        return {"id": ak.id, "used_today": ak.used_today}
+    finally:
+        db.close()
+
+
+
 
