@@ -33,3 +33,5 @@ def on_startup():
 @app.get("/", tags=["health"])
 def root():
     return {"status": "ok"}
+from backend.app.middleware.api_key_guard import ApiKeyGuard
+app.add_middleware(ApiKeyGuard)
