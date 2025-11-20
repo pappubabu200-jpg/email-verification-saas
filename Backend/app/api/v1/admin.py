@@ -428,4 +428,34 @@ def admin_update_api_key_rate(api_key_id: int, rate_limit_per_sec: int, admin = 
     finally:
         db.close()
 
-    
+
+@router.get("/usage", summary="Admin Usage Viewer")
+def admin_usage(limit: int = 100, admin=Depends(get_current_admin)):
+    from backend.app.db import SessionLocal
+    from backend.app.models.usage_log import UsageLog
+
+    db = SessionLocal()
+    rows = (
+        db.query(UsageLog)
+        .order_by(UsageLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    out = []
+    for r in rows:
+        out.append({
+            "id": r.id,
+            "user_id": r.user_id,
+            "api_key_id": r.api_key_id,
+            "endpoint": r.endpoint,
+            "method": r.method,
+            "status": r.status_code,
+            "ip": r.ip,
+            "ua": r.user_agent,
+            "created_at": str(r.created_at),
+        })
+
+    return out
+
+
