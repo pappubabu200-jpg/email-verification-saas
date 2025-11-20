@@ -32,3 +32,223 @@ def get_domain_reputation(domain: str, admin = Depends(get_current_admin)):
         "mx_used": mx_used,
         "reputation": reputation
   }
+
+@router.get("/domains/top-good")
+def top_good_domains(limit: int = 50, admin = Depends(get_current_admin)):
+    """
+    Returns domains with highest good:bad ratio.
+    Based on Redis counters.
+    """
+    import redis, json
+
+    try:
+        r = redis.from_url("redis://redis:6379/0")
+    except:
+        raise HTTPException(500, "redis_not_connected")
+
+    keys = r.keys("domain:*:good")
+    final = []
+
+    for k in keys:
+        domain = k.decode().split(":")[1]
+        good = int(r.get(f"domain:{domain}:good") or 0)
+        bad = int(r.get(f"domain:{domain}:bad") or 0)
+        total = good + bad
+        if total == 0:
+            continue
+        ratio = good / total
+        final.append({
+            "domain": domain,
+            "good": good,
+            "bad": bad,
+            "ratio": ratio
+        })
+
+    final_sorted = sorted(final, key=lambda x: x["ratio"], reverse=True)
+    return final_sorted[:limit]
+
+@router.get("/domains/top-bad")
+def top_bad_domains(limit: int = 50, admin = Depends(get_current_admin)):
+    import redis
+    try:
+        r = redis.from_url("redis://redis:6379/0")
+    except:
+        raise HTTPException(500, "redis_not_connected")
+
+    keys = r.keys("domain:*:bad")
+    final = []
+
+    for k in keys:
+        domain = k.decode().split(":")[1]
+        good = int(r.get(f"domain:{domain}:good") or 0)
+        bad = int(r.get(f"domain:{domain}:bad") or 0)
+        total = good + bad
+        if total == 0:
+            continue
+        final.append({
+            "domain": domain,
+            "good": good,
+            "bad": bad,
+            "fail_rate": bad / total
+        })
+
+    final_sorted = sorted(final, key=lambda x: x["fail_rate"], reverse=True)
+    return final_sorted[:limit]
+
+
+@router.get("/domain-trends/{domain}")
+def domain_trends(domain: str, admin = Depends(get_current_admin)):
+    """
+    In future you will store time-series. 
+    For now return historical good/bad counts (real-time).
+    """
+    import redis
+    domain = domain.lower()
+
+    try:
+        r = redis.from_url("redis://redis:6379/0")
+    except:
+        raise HTTPException(500, "redis_not_connected")
+
+    good = int(r.get(f"domain:{domain}:good") or 0)
+    bad = int(r.get(f"domain:{domain}:bad") or 0)
+
+    return {
+        "domain": domain,
+        "good": good,
+        "bad": bad,
+        "trend": "improving" if good > bad else "declining"
+    }
+
+
+@router.get("/deliverability-summary")
+def deliverability_summary(admin = Depends(get_current_admin)):
+    """
+    Aggregated deliverability KPI for admin dashboard.
+    """
+    import redis
+    try:
+        r = redis.from_url("redis://redis:6379/0")
+    except:
+        raise HTTPException(500, "redis_not_connected")
+
+    good_keys = r.keys("domain:*:good")
+    bad_keys = r.keys("domain:*:bad")
+
+    good_total = sum(int(r.get(k) or 0) for k in good_keys)
+    bad_total = sum(int(r.get(k) or 0) for k in bad_keys)
+
+    total = good_total + bad_total
+    if total == 0:
+        rate = None
+    else:
+        rate = round((good_total / total) * 100, 2)
+
+    return {
+        "total_emails": total,
+        "successful": good_total,
+        "failed": bad_total,
+        "success_rate_percent": rate
+        }
+
+
+
+@router.get("/recent-failures")
+def recent_failures(limit: int = 100, admin = Depends(get_current_admin)):
+    """
+    Fetch recent invalid emails from DB.
+    """
+    db = SessionLocal()
+    try:
+        rows = db.query(VerificationResult)\
+                 .filter(VerificationResult.status == "invalid")\
+                 .order_by(VerificationResult.created_at.desc())\
+                 .limit(limit).all()
+
+        return [{
+            "email": r.email,
+            "status": r.status,
+            "risk_score": r.risk_score,
+            "created_at": r.created_at
+        } for r in rows]
+    finally:
+        db.close()
+
+
+@router.get("/users")
+def admin_list_users(limit: int = 50, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        rows = db.query(User)\
+                 .order_by(User.created_at.desc())\
+                 .limit(limit).all()
+        return [{"id": u.id, "email": u.email, "is_active": u.is_active,
+                 "created_at": u.created_at} for u in rows]
+    finally:
+        db.close()
+
+
+from backend.app.services.credits_service import get_balance
+
+@router.get("/user/{user_id}/credits")
+def admin_user_credits(user_id: int, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        bal = get_balance(db, user_id)
+        return {"user_id": user_id, "balance": float(bal)}
+    finally:
+        db.close()
+
+
+
+@router.get("/user/{user_id}/verifications")
+def admin_user_verifications(user_id: int, limit: int = 100, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        rows = db.query(VerificationResult)\
+                 .filter(VerificationResult.user_id == user_id)\
+                 .order_by(VerificationResult.created_at.desc())\
+                 .limit(limit).all()
+
+        return [{
+            "email": r.email,
+            "status": r.status,
+            "risk_score": r.risk_score,
+            "created_at": r.created_at
+        } for r in rows]
+    finally:
+        db.close()
+
+
+
+@router.get("/bulk-jobs")
+def admin_bulk_jobs(limit: int = 50, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        rows = db.query(CreditReservation)\
+                 .order_by(CreditReservation.created_at.desc())\
+                 .limit(limit).all()
+        return [{
+            "job_id": r.job_id,
+            "user_id": r.user_id,
+            "amount_reserved": float(r.amount),
+            "locked": r.locked,
+            "expires_at": r.expires_at,
+            "created_at": r.created_at
+        } for r in rows]
+    finally:
+        db.close()
+
+
+@router.delete("/clear-domain-cache/{domain}")
+def clear_domain_cache(domain: str, admin = Depends(get_current_admin)):
+    """
+    Clears cached reputation for a domain.
+    """
+    import redis
+    try:
+        r = redis.from_url("redis://redis:6379/0")
+        r.delete(f"domain:reputation:{domain}")
+        return {"cleared": domain}
+    except:
+        raise HTTPException(500, "redis_not_connected")
