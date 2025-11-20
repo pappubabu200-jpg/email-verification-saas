@@ -252,3 +252,153 @@ def clear_domain_cache(domain: str, admin = Depends(get_current_admin)):
         return {"cleared": domain}
     except:
         raise HTTPException(500, "redis_not_connected")
+
+
+
+
+from backend.app.models.decision_maker import DecisionMaker
+from backend.app.db import SessionLocal
+
+@router.get("/decision-makers")
+def admin_list_decision_makers(
+    company: str = None,
+    domain: str = None,
+    verified: bool = None,
+    limit: int = 100,
+    admin = Depends(get_current_admin)
+):
+    """
+    Admin: List decision makers with optional filters.
+    """
+    db = SessionLocal()
+    try:
+        q = db.query(DecisionMaker)
+
+        if company:
+            q = q.filter(DecisionMaker.company.ilike(f"%{company}%"))
+        if domain:
+            q = q.filter(DecisionMaker.domain == domain.lower())
+        if verified is not None:
+            q = q.filter(DecisionMaker.verified == verified)
+
+        q = q.order_by(DecisionMaker.created_at.desc()).limit(limit)
+        rows = q.all()
+
+        return [
+            {
+                "id": r.id,
+                "company": r.company,
+                "domain": r.domain,
+                "name": r.full_name(),
+                "title": r.title,
+                "email": r.email,
+                "source": r.source,
+                "verified": r.verified,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+
+
+import csv
+from fastapi.responses import StreamingResponse
+
+@router.get("/decision-makers/export")
+def export_decision_makers_csv(
+    company: str = None,
+    domain: str = None,
+    verified: bool = None,
+    admin = Depends(get_current_admin)
+):
+    """
+    Admin: Export decision makers as CSV file.
+    """
+
+    db = SessionLocal()
+    try:
+        q = db.query(DecisionMaker)
+
+        if company:
+            q = q.filter(DecisionMaker.company.ilike(f"%{company}%"))
+        if domain:
+            q = q.filter(DecisionMaker.domain == domain.lower())
+        if verified is not None:
+            q = q.filter(DecisionMaker.verified == verified)
+
+        q = q.order_by(DecisionMaker.created_at.desc())
+        rows = q.all()
+
+        # generator stream — low memory usage
+        def iter_csv():
+            header = [
+                "id", "company", "domain", "first_name", "last_name",
+                "title", "email", "verified", "source", "created_at"
+            ]
+            yield ",".join(header) + "\n"
+
+            for r in rows:
+                yield ",".join([
+                    str(r.id or ""),
+                    str(r.company or ""),
+                    str(r.domain or ""),
+                    str(r.first_name or ""),
+                    str(r.last_name or ""),
+                    str(r.title or ""),
+                    str(r.email or ""),
+                    str(r.verified),
+                    str(r.source or ""),
+                    str(r.created_at or "")
+                ]) + "\n"
+
+        return StreamingResponse(
+            iter_csv(),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=decision_makers.csv"}
+        )
+
+    finally:
+        db.close()
+
+
+@router.get("/decision-makers/{dm_id}")
+def admin_get_decision_maker(dm_id: int, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        r = db.query(DecisionMaker).get(dm_id)
+        if not r:
+            raise HTTPException(status_code=404, detail="not_found")
+        return {
+            "id": r.id,
+            "company": r.company,
+            "domain": r.domain,
+            "first_name": r.first_name,
+            "last_name": r.last_name,
+            "title": r.title,
+            "email": r.email,
+            "verified": r.verified,
+            "source": r.source,
+            "raw": r.raw,
+            "created_at": r.created_at,
+        }
+    finally:
+        db.close()
+
+
+
+@router.delete("/decision-makers/{dm_id}")
+def admin_delete_decision_maker(dm_id: int, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        r = db.query(DecisionMaker).get(dm_id)
+        if not r:
+            raise HTTPException(status_code=404, detail="not_found")
+
+        db.delete(r)
+        db.commit()
+        return {"deleted": dm_id}
+
+    finally:
+        db.close()
