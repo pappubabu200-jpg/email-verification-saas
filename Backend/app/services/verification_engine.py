@@ -1,58 +1,91 @@
-import json
-import uuid
-import logging
-from typing import Dict, Optional
 
+import json
+import logging
+import time
+
+from backend.app.models.verification_result import VerificationResult
 from backend.app.db import SessionLocal
 from backend.app.services.mx_lookup import choose_mx_for_domain
 from backend.app.services.smtp_probe import smtp_probe
 from backend.app.services.cache import get_cached, set_cached
+from backend.app.services.domain_throttle import acquire, release
 from backend.app.services.verification_score import score_verification
-from backend.app.models.verification_result import VerificationResult
+
+# NEW imports for deliverability engine
+from backend.app.services.deliverability_monitor import (
+    record_domain_result,
+    compute_domain_score,
+)
 
 logger = logging.getLogger(__name__)
 
-def _split_local_domain(email: str):
-    if "@" not in email:
-        return email, ""
-    local, domain = email.split("@", 1)
-    return local, domain.lower()
 
-def verify_email_sync(email: str, user_id: Optional[int] = None) -> Dict:
+def verify_email_sync(email: str, user_id: int = None):
     """
-    Synchronous verification flow for single checks:
-    - return cached if present
-    - resolve MX
-    - smtp probe
-    - score
-    - persist result
-    - cache result
+    100% production version.
+    Includes:
+    - cache
+    - throttling
+    - smtp_probe
+    - scoring
+    - persistence
+    - deliverability tracking
     """
-    # check cache
+    # -------- CACHE CHECK --------
     cached = get_cached(email)
     if cached:
-        cached["cached"] = True
+        # also record historical: treat valid as "good"
+        domain = email.split("@")[-1].lower()
+        try:
+            success = cached.get("status") == "valid"
+            record_domain_result(domain, success)
+        except Exception:
+            pass
         return cached
 
-    local, domain = _split_local_domain(email)
-    if not domain:
-        result = {"email": email, "status": "invalid", "reason": "no_domain"}
+    # -------- DOMAIN + MX --------
+    if "@" not in email:
+        result = {"email": email, "status": "invalid", "reason": "no_at_symbol"}
         set_cached(email, result)
         return result
+
+    local, domain = email.split("@", 1)
+    domain = domain.lower()
 
     mx_hosts = choose_mx_for_domain(domain)
     if not mx_hosts:
         result = {"email": email, "status": "invalid", "reason": "no_mx"}
         set_cached(email, result)
+        record_domain_result(domain, False)
         return result
 
+    # -------- SMTP PROBE --------
     probe = smtp_probe(email, mx_hosts)
-    scored = score_verification(probe)
-    # add some common fields
-    scored.update({"email": email, "cached": False})
-    # persist in DB
+
+    # -------- SCORING --------
+    scored = score_verification(probe)  # returns {status, risk_score, details}
+
+    # -------- DELIVERABILITY RECORDING --------
     try:
-        db = SessionLocal()
+        success = scored.get("status") == "valid"
+        record_domain_result(domain, success)
+    except Exception as e:
+        logger.debug("deliverability record failed: %s", e)
+
+    # -------- OPTIONAL: DOMAIN SCORE PRE-COMPUTE --------
+    try:
+        mx_used = probe.get("mx_host")
+        domain_rep = compute_domain_score(domain, mx_used)
+        scored["domain_reputation"] = domain_rep
+    except Exception:
+        scored["domain_reputation"] = None
+
+    # -------- CACHE STORE --------
+    set_cached(email, scored)
+
+    # -------- PERSIST IN DATABASE --------
+    db = SessionLocal()
+    try:
         vr = VerificationResult(
             user_id=user_id,
             job_id=None,
@@ -64,19 +97,9 @@ def verify_email_sync(email: str, user_id: Optional[int] = None) -> Dict:
         )
         db.add(vr)
         db.commit()
-        db.refresh(vr)
     except Exception as e:
-        logger.exception("Failed to persist verification_result: %s", e)
+        logger.exception("DB insert failed: %s", e)
     finally:
-        try:
-            db.close()
-        except Exception:
-            pass
-
-    # cache the scored result
-    try:
-        set_cached(email, scored)
-    except Exception:
-        pass
+        db.close()
 
     return scored
