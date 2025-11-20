@@ -1,37 +1,86 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.app.api.v1 import auth as auth_router
-from backend.app.api.v1 import users as users_router
+from backend.app.middleware.api_key_guard import ApiKeyGuard
+from backend.app.config import settings
 
-from backend.app.db import init_db
+# PROMETHEUS (optional)
+try:
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+    PROM_ENABLED = True
+except Exception:
+    PROM_ENABLED = False
 
+# ---------------------------------------------------------
+# FASTAPI APP
+# ---------------------------------------------------------
 app = FastAPI(
     title="Email Verification SaaS",
-    description="Backend API for email verification, extractor and decision-maker services",
-    version="0.1.0",
+    version="1.0.0",
+    description="Full backend: email verification, bulk jobs, extractor, decision makers, billing, API keys"
 )
 
-# CORS (adjust origins in production)
+# ---------------------------------------------------------
+# MIDDLEWARE
+# ---------------------------------------------------------
+# API Key Middleware (required for decision maker throttling)
+app.add_middleware(ApiKeyGuard)
+
+# CORS (Frontend -> Backend communication)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],   # change to your domain later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(auth_router.router, prefix="/api")
-app.include_router(users_router.router, prefix="/api")
+# ---------------------------------------------------------
+# ROUTERS
+# ---------------------------------------------------------
+from backend.app.api.v1 import (
+    auth,
+    users,
+    verification,
+    bulk,
+    extractor,
+    decision_makers,
+    api_keys,
+    billing,
+    usage,
+    admin,
+    webhooks,
+)
 
-@app.on_event("startup")
-def on_startup():
-    # Initialize DB (creates tables if not present)
-    init_db()
+# Public + Protected routes
+app.include_router(auth.router, prefix="/api/v1/auth")
+app.include_router(users.router, prefix="/api/v1/users")
+app.include_router(verification.router, prefix="/api/v1/verify")
+app.include_router(bulk.router, prefix="/api/v1/bulk")
+app.include_router(extractor.router, prefix="/api/v1/extractor")
+app.include_router(decision_makers.router)
+app.include_router(api_keys.router)
+app.include_router(billing.router)
+app.include_router(usage.router)
+app.include_router(admin.router)
+app.include_router(webhooks.router)
 
-@app.get("/", tags=["health"])
+# ---------------------------------------------------------
+# METRICS ENDPOINT
+# ---------------------------------------------------------
+if PROM_ENABLED:
+    @app.get("/metrics")
+    def metrics():
+        data = generate_latest()
+        return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+else:
+    @app.get("/metrics")
+    def metrics_disabled():
+        return {"status": "metrics_disabled"}
+
+# ---------------------------------------------------------
+# HEALTH CHECK
+# ---------------------------------------------------------
+@app.get("/")
 def root():
-    return {"status": "ok"}
-from backend.app.middleware.api_key_guard import ApiKeyGuard
-app.add_middleware(ApiKeyGuard)
+    return {"status": "ok", "service": "backend", "version": "1.0.0"}
