@@ -11,3 +11,18 @@ if not user:
 # attach to request.state
 request.state.api_user = user
 request.state.api_key_row = key_row
+from backend.app.services.usage_service import log_usage
+
+response = await call_next(request)
+
+# log usage after request is processed
+user = getattr(request.state, "api_user", None)
+key_row = getattr(request.state, "api_key_row", None)
+
+if user:
+    try:
+        log_usage(user, key_row, request, response.status_code)
+    except Exception:
+        pass
+
+return response
