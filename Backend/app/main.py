@@ -93,5 +93,8 @@ app.include_router(admin_analytics.router)
 from backend.app.api.v1 import admin_analytics
 app.include_router(admin_analytics.router)
 
+from backend.app.api.v1 import bulk_compat
+app.include_router(bulk_compat.router)
+
 
 
