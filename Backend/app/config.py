@@ -35,3 +35,9 @@ settings = Settings()
 BULK_CHUNK_SIZE: int = 200
 BULK_INPUT_FOLDER: str = "/tmp/bulk_inputs"
 BULK_RESULTS_FOLDER: str = "/tmp/bulk_results"
+
+
+S3_BUCKET: str = ""
+S3_ACCESS_KEY: str = ""
+S3_SECRET_KEY: str = ""
+S3_REGION: str = ""
