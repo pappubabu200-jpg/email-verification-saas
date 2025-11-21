@@ -30,3 +30,8 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+BULK_CHUNK_SIZE: int = 200
+BULK_INPUT_FOLDER: str = "/tmp/bulk_inputs"
+BULK_RESULTS_FOLDER: str = "/tmp/bulk_results"
