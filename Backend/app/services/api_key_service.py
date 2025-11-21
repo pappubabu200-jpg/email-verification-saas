@@ -1,4 +1,5 @@
 # backend/app/services/api_key_service.py
+
 import logging
 from sqlalchemy.orm import Session
 from sqlalchemy import select, update
@@ -7,156 +8,161 @@ from fastapi import HTTPException
 from backend.app.db import SessionLocal
 from backend.app.models.api_key import ApiKey
 
+# Redis support
+try:
+    import redis
+    from backend.app.config import settings
+    REDIS = redis.from_url(settings.REDIS_URL)
+except Exception:
+    REDIS = None
+
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------
+# REDIS FAST COUNTER HELPERS
+# ---------------------------------------------------------
+
+def _redis_usage_key(api_key_id: int) -> str:
+    return f"api_key:{api_key_id}:used_today"
+
+
+def redis_increment_usage(api_key_row: ApiKey, amount: int = 1):
+    """
+    If Redis is available, increment fast counter.
+    Returns new value or None (if Redis unavailable).
+    """
+    if not REDIS:
+        return None
+
+    try:
+        key = _redis_usage_key(api_key_row.id)
+        new_val = REDIS.incrby(key, amount)
+
+        # set TTL = 24 hours
+        if new_val == amount:
+            REDIS.expire(key, 86400)
+
+        return new_val
+
+    except Exception as e:
+        logger.debug(f"Redis increment error: {e}")
+        return None
+
+
+# ---------------------------------------------------------
+# API KEY LOOKUPS
+# ---------------------------------------------------------
+
 def get_api_key(db: Session, raw_key: str) -> ApiKey:
-    """
-    Return ApiKey row for given API key string or raise HTTPException(401).
-    """
+    """Return ApiKey row for given API key string OR raise 401."""
     if not raw_key:
         raise HTTPException(status_code=401, detail="api_key_required")
+
     ak = db.query(ApiKey).filter(ApiKey.key == raw_key, ApiKey.active == True).first()
     if not ak:
         raise HTTPException(status_code=401, detail="invalid_api_key")
+
     return ak
 
-def get_api_key_optional(db: Session, raw_key: str):
-    """
-    Return ApiKey row or None (no exception). Use when you want permissive behavior.
-    """
+
+def get_api_key_optional(db: Session, raw_key: str) -> ApiKey:
+    """Return ApiKey row or None (no exception)."""
     if not raw_key:
         return None
     return db.query(ApiKey).filter(ApiKey.key == raw_key).first()
 
+
+# ---------------------------------------------------------
+# DAILY USAGE COUNTER (REDIS FIRST → SQL FALLBACK)
+# ---------------------------------------------------------
+
 def increment_usage(db: Session, api_key_row: ApiKey, amount: int = 1) -> dict:
     """
-    Increment used_today by `amount` and check daily_limit.
-    Returns dict: {"used": int, "daily_limit": int, "ok": bool}
-    Raises HTTPException(429) if over limit (soft-block).
-    Uses a DB row update: UPDATE api_keys SET used_today = used_today + amount WHERE id = ...
+    Increment used_today by `amount` and enforce daily_limit.
+
+    Order:
+    A) Redis fast counter (atomic, high performance)
+    B) SQL fallback if Redis unavailable
     """
+
     if not api_key_row:
         raise HTTPException(status_code=401, detail="api_key_required")
 
     if not api_key_row.active:
         raise HTTPException(status_code=403, detail="api_key_disabled")
 
-    # If daily_limit==0 treat as unlimited
+    # ---------------------------------------------------------
+    # (A) REDIS FAST PATH
+    # ---------------------------------------------------------
+    redis_count = redis_increment_usage(api_key_row, amount)
+    if redis_count is not None:
+
+        # enforce limit
+        if api_key_row.daily_limit and redis_count > api_key_row.daily_limit:
+            try:
+                REDIS.decrby(_redis_usage_key(api_key_row.id), amount)
+            except Exception:
+                pass
+            raise HTTPException(status_code=429, detail="daily_api_key_limit_exceeded")
+
+        return {
+            "used": redis_count,
+            "daily_limit": api_key_row.daily_limit,
+            "ok": True
+        }
+
+    # ---------------------------------------------------------
+    # (B) SQL FALLBACK
+    # ---------------------------------------------------------
     try:
-        new_used = None
-        # atomic update via SQL expression to avoid race (ORM may not be perfectly atomic across processes,
-        # but this pattern helps; for heavy load you should use Redis counters or DB-level locking)
         stmt = (
             update(ApiKey)
             .where(ApiKey.id == api_key_row.id)
-            .values(used_today = ApiKey.used_today + amount)
-            .returning(ApiKey.used_today, ApiKey.daily_limit)
+            .values(used_today=ApiKey.used_today + amount)
+            .returning(ApiKey.used_today)
         )
-        res = db.execute(stmt)
-        row = res.fetchone()
+        new_used = db.execute(stmt).scalar()
         db.commit()
-        if row:
-            new_used, daily_limit = int(row[0]), int(row[1] or 0)
-        else:
-            # fallback to reload
-            db.refresh(api_key_row)
-            new_used = int(api_key_row.used_today)
-            daily_limit = int(api_key_row.daily_limit or 0)
+
+        new_used = int(new_used)
+
+        if api_key_row.daily_limit and new_used > api_key_row.daily_limit:
+            raise HTTPException(status_code=429, detail="daily_api_key_limit_exceeded")
+
+        return {
+            "used": new_used,
+            "daily_limit": api_key_row.daily_limit,
+            "ok": True
+        }
+
     except Exception as e:
-        logger.exception("increment_usage DB error: %s", e)
-        # permissive fallback (allow) to avoid blocking in DB outage
-        return {"used": api_key_row.used_today or 0, "daily_limit": api_key_row.daily_limit or 0, "ok": True}
+        logger.exception("SQL usage increment failed: %s", e)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="increment_failed")
 
-    # daily_limit == 0 => unlimited
-    if daily_limit and new_used > daily_limit:
-        # Rollback action: decrement back the amount to avoid overshoot
-        try:
-            stmt2 = update(ApiKey).where(ApiKey.id == api_key_row.id).values(used_today = ApiKey.used_today - amount)
-            db.execute(stmt2)
-            db.commit()
-        except Exception:
-            logger.debug("rollback decrement failed after exceeding limit")
 
-        raise HTTPException(status_code=429, detail="daily_api_key_limit_exceeded")
+# ---------------------------------------------------------
+# ADMIN RESET (optional)
+# ---------------------------------------------------------
 
-    return {"used": new_used, "daily_limit": daily_limit, "ok": True}
-
-def set_api_key_active(db: Session, api_key_id: int, active: bool = True) -> ApiKey:
-    """
-    Enable/disable API key.
-    """
-    ak = db.query(ApiKey).get(api_key_id)
-    if not ak:
-        raise HTTPException(status_code=404, detail="api_key_not_found")
-    ak.active = bool(active)
-    db.add(ak)
-    db.commit()
-    db.refresh(ak)
-    return ak
-
-def reset_api_key_usage(db: Session, api_key_id: int):
-    """
-    Reset used_today to zero for a single api key.
-    """
-    ak = db.query(ApiKey).get(api_key_id)
-    if not ak:
-        raise HTTPException(status_code=404, detail="api_key_not_found")
-    ak.used_today = 0
-    db.add(ak)
-    db.commit()
-    db.refresh(ak)
-    return ak
-
-def reset_all_api_keys_usage():
-    """
-    Reset used_today=0 for all keys. Intended to be called daily by Celery beat or cron.
-    """
-    db = SessionLocal()
+def reset_usage(db: Session, api_key_id: int):
+    """Admin-only reset usage counters."""
     try:
-        db.query(ApiKey).update({ApiKey.used_today: 0})
+        stmt = (
+            update(ApiKey)
+            .where(ApiKey.id == api_key_id)
+            .values(used_today=0)
+        )
+        db.execute(stmt)
         db.commit()
+
+        # reset Redis too
+        if REDIS:
+            REDIS.delete(_redis_usage_key(api_key_id))
+
+        return {"status": "ok", "reset": api_key_id}
+
     except Exception as e:
-        logger.exception("reset_all_api_keys_usage failed: %s", e)
-    finally:
-        db.close()
-
-# NEW: Redis usage counters
-import redis
-from datetime import datetime, timedelta
-from backend.app.config import settings
-
-try:
-    REDIS = redis.from_url(settings.REDIS_URL)
-except Exception:
-    REDIS = None
-
-def _redis_usage_key(api_key_id: int) -> str:
-    today = datetime.utcnow().strftime("%Y%m%d")
-    return f"usage:{api_key_id}:{today}"
-
-
-def redis_increment_usage(api_key_row, amount: int = 1):
-    """
-    Atomic Redis increment with midnight TTL auto-expire.
-    """
-    if not REDIS:
-        return None  # fallback to DB usage
-
-    key = _redis_usage_key(api_key_row.id)
-
-    # INCR
-    new_val = REDIS.incrby(key, amount)
-
-    # Set TTL if new key was created
-    if new_val == amount:
-        # Expire at next midnight
-        now = datetime.utcnow()
-        tomorrow = now + timedelta(days=1)
-        midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day)
-        ttl_seconds = int((midnight - now).total_seconds())
-        REDIS.expire(key, ttl_seconds)
-
-    return new_val
-
-
-
+        db.rollback()
+        raise HTTPException(status_code=500, detail="reset_failed")
