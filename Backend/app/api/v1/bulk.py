@@ -1,29 +1,143 @@
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
-import io, uuid
-from backend.app.services.csv_parser import extract_emails_from_csv_bytes
-from backend.app.services.bulk_processor import submit_bulk_job
-from backend.app.utils.security import get_current_user
+# backend/app/api/v1/bulk.py
+import os, io, uuid, csv, zipfile, logging
+from fastapi import APIRouter, Request, Depends, UploadFile, File, HTTPException
+from backend.app.db import SessionLocal
+from backend.app.models.bulk_job import BulkJob
+from backend.app.services.pricing_service import get_cost_for_key
+from backend.app.services.credits_service import reserve_and_deduct, get_user_balance
+from backend.app.workers.bulk_tasks import process_bulk_task
+from backend.app.utils.security import get_current_user, get_current_admin
+from backend.app.config import settings
+from decimal import Decimal, ROUND_HALF_UP
 
-router = APIRouter(prefix="/v1/bulk", tags=["Bulk"])
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/v1/bulk", tags=["bulk"])
 
-@router.post("/upload")
-async def upload_csv(file: UploadFile = File(...), current_user = Depends(get_current_user)):
+INPUT_FOLDER = getattr(settings, "BULK_INPUT_FOLDER", "/tmp/bulk_inputs")
+os.makedirs(INPUT_FOLDER, exist_ok=True)
+
+def _dec(x) -> Decimal:
+    return Decimal(str(x)).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+
+# ---- submit job endpoint ----
+@router.post("/submit")
+async def submit_bulk(file: UploadFile = File(...), webhook_url: str = None, request: Request = None, current_user = Depends(get_current_user)):
+    user = current_user
+    if not user:
+        raise HTTPException(status_code=401, detail="auth_required")
+
     content = await file.read()
-    emails = extract_emails_from_csv_bytes(content)
-    if not emails:
-        raise HTTPException(status_code=400, detail="no_emails_found")
-    job_id = f"job-{uuid.uuid4().hex[:12]}"
-    res = submit_bulk_job(getattr(current_user, "id", None), job_id, emails)
-    return {"job_id": job_id, "queued": res.get("queued", 0)}
+    filename = (file.filename or f"upload-{uuid.uuid4().hex}").lower()
+    # Save input to disk
+    fname = f"{user.id}-{uuid.uuid4().hex[:12]}-{filename}"
+    input_path = os.path.join(INPUT_FOLDER, fname)
+    with open(input_path, "wb") as fh:
+        fh.write(content)
 
+    # Count emails quickly (simple CSV/text parse)
+    emails = []
+    try:
+        _, ext = os.path.splitext(filename)
+        if ext == ".zip":
+            z = zipfile.ZipFile(io.BytesIO(content))
+            for name in z.namelist():
+                if name.endswith("/") or name.startswith("__MACOSX"):
+                    continue
+                if name.lower().endswith((".csv", ".txt")):
+                    raw = z.read(name).decode("utf-8", errors="ignore")
+                    # simple line parse
+                    for line in raw.splitlines():
+                        s = line.strip()
+                        if s and "@" in s:
+                            emails.append(s)
+        elif ext in (".csv", ".txt"):
+            raw = content.decode("utf-8", errors="ignore")
+            for row in csv.reader(io.StringIO(raw)):
+                for col in row:
+                    v = col.strip()
+                    if v and "@" in v:
+                        emails.append(v)
+                        break
+        else:
+            # fallback: line parser
+            raw = content.decode("utf-8", errors="ignore")
+            for line in raw.splitlines():
+                s = line.strip()
+                if s and "@" in s:
+                    emails.append(s)
+    except Exception as e:
+        logger.exception("count parse failed: %s", e)
+        raise HTTPException(status_code=400, detail="parse_failed")
 
-@router.post("/upload")
-async def upload_csv(file: UploadFile = File(...), request: Request, current_user = Depends(get_current_user)):
-    content = await file.read()
-    emails = extract_emails_from_csv_bytes(content)
+    unique_emails = list(dict.fromkeys([e.lower() for e in emails]))
+    total = len(unique_emails)
+    if total == 0:
+        raise HTTPException(status_code=400, detail="no_valid_emails")
 
-    user_id = getattr(request.state, "api_user_id", current_user.id)
+    # Pricing & reservation
+    per_cost = _dec(get_cost_for_key("verify.bulk_per_email") or 0)
+    estimated_cost = (per_cost * Decimal(total)).quantize(Decimal("0.000001"))
 
-    job_id = f"job-{uuid.uuid4().hex[:12]}"
-    res = submit_bulk_job(user_id, job_id, emails)
-    return {"job_id": job_id, "queued": res["queued"]}
+    # Reserve credits up-front
+    try:
+        reserve_tx = reserve_and_deduct(user.id, estimated_cost, reference=f"bulk-reserve:{uuid.uuid4().hex[:8]}")
+    except HTTPException as e:
+        raise e
+
+    # create DB job
+    db = SessionLocal()
+    try:
+        job_id = f"bulk-{uuid.uuid4().hex[:12]}"
+        job = BulkJob(
+            user_id = user.id,
+            job_id = job_id,
+            status = "queued",
+            input_path = input_path,
+            total = total,
+            webhook_url = webhook_url
+        )
+        db.add(job); db.commit(); db.refresh(job)
+    finally:
+        db.close()
+
+    # enqueue Celery task with estimated_cost passed
+    try:
+        process_bulk_task.delay(job_id, float(estimated_cost))
+    except Exception:
+        logger.exception("enqueue failed, but job created")
+        # we keep job queued; worker restart will pick it (or you can schedule)
+    return {"job_id": job_id, "total": total, "estimated_cost": float(estimated_cost), "reserve_tx": reserve_tx}
+
+# ---- admin endpoints ----
+@router.get("/status/{job_id}")
+def job_status(job_id: str, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        job = db.query(BulkJob).filter(BulkJob.job_id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="job_not_found")
+        return {
+            "job_id": job.job_id,
+            "status": job.status,
+            "total": job.total,
+            "processed": job.processed,
+            "valid": job.valid,
+            "invalid": job.invalid,
+            "input_path": job.input_path,
+            "output_path": job.output_path,
+            "error_message": job.error_message
+        }
+    finally:
+        db.close()
+
+@router.get("/download/{job_id}")
+def download_results(job_id: str, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    try:
+        job = db.query(BulkJob).filter(BulkJob.job_id == job_id).first()
+        if not job or not job.output_path:
+            raise HTTPException(status_code=404, detail="results_not_ready")
+        # return path so frontend can download from file server (or implement streaming endpoint)
+        return {"output_path": job.output_path}
+    finally:
+        db.close()
