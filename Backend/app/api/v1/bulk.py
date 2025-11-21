@@ -141,3 +141,36 @@ def download_results(job_id: str, admin = Depends(get_current_admin)):
         return {"output_path": job.output_path}
     finally:
         db.close()
+
+
+# inside the existing bulk router in backend/app/api/v1/bulk.py
+
+@router.get("/my-jobs")
+def list_my_jobs(page: int = 1, per_page: int = 20, current_user = Depends(get_current_user)):
+    db = SessionLocal()
+    try:
+        q = db.query(BulkJob).filter(BulkJob.user_id == current_user.id).order_by(BulkJob.created_at.desc())
+        total = q.count()
+        rows = q.limit(per_page).offset((page-1)*per_page).all()
+        return {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "items": [
+                {
+                    "job_id": r.job_id,
+                    "status": r.status,
+                    "total": r.total,
+                    "processed": r.processed,
+                    "valid": r.valid,
+                    "invalid": r.invalid,
+                    "created_at": str(r.created_at),
+                    "output_path": r.output_path
+                } for r in rows
+            ]
+        }
+    finally:
+        db.close()
+
+
+
