@@ -1,58 +1,3 @@
-
-import uuid
-import logging
-from typing import List, Optional
-from fastapi import HTTPException
-
-from backend.app.celery_app import celery_app
-from backend.app.services.credits_service import reserve_credits
-from backend.app.services.credits_service import COST_PER_VERIFICATION, capture_reservation
-
-logger = logging.getLogger(__name__)
-
-# Celery task name (worker implements verify_email_task)
-VERIFY_TASK_NAME = "backend.app.workers.tasks.verify_email_task"
-
-def submit_bulk_job(user_id: int, job_id: str, emails: List[str], meta: Optional[dict] = None) -> dict:
-    """
-    Reserve credits for the bulk job, then enqueue tasks.
-    If reservation fails (insufficient credits), raise HTTPException(402).
-    """
-    meta = meta or {}
-    count = len(emails)
-    total_cost = COST_PER_VERIFICATION * count
-
-    # Reserve credits (throws HTTPException(402) if not enough)
-    db = None
-    try:
-        from backend.app.db import SessionLocal
-        db = SessionLocal()
-        reservation = reserve_credits(db, user_id, total_cost, job_id=job_id, reference=job_id)
-    except HTTPException:
-        # bubble up to caller (API will return 402)
-        raise
-    except Exception as e:
-        logger.exception("Failed to reserve credits: %s", e)
-        raise HTTPException(status_code=500, detail="reserve_failed")
-    finally:
-        if db:
-            db.close()
-
-    queued = 0
-    # enqueue tasks
-    for email in emails:
-        try:
-            celery_app.send_task(VERIFY_TASK_NAME, args=[email, {"user_id": user_id, "job_id": job_id, "reservation_id": reservation.id}])
-            queued += 1
-        except Exception as e:
-            logger.exception("Failed to enqueue verify task for %s: %s", email, e)
-            continue
-
-    # Return job info (reservation id can be used to capture when done)
-    return {"job_id": job_id, "queued": queued, "reservation_id": reservation.id}
-
-
-
 # backend/app/services/bulk_processor.py
 import csv, os, math, time, logging
 from decimal import Decimal, ROUND_HALF_UP
@@ -65,12 +10,13 @@ from backend.app.services.pricing_service import get_cost_for_key
 from backend.app.services.credits_service import add_credits
 from backend.app.services.webhook_sender import webhook_task
 from backend.app.config import settings
+from backend.app.services.storage_s3 import upload_file_local_or_s3
+from backend.app.services.domain_backoff import acquire_slot, release_slot, get_backoff_seconds, increase_backoff, clear_backoff
 
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = int(getattr(settings, "BULK_CHUNK_SIZE", 200))
 RESULTS_FOLDER = getattr(settings, "BULK_RESULTS_FOLDER", "/tmp/bulk_results")
-
 os.makedirs(RESULTS_FOLDER, exist_ok=True)
 
 def _dec(x) -> Decimal:
@@ -89,13 +35,11 @@ def read_emails_from_path(path: str) -> List[str]:
                         emails.append(v.lower())
                         break
     else:
-        # fallback: read lines
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             for line in fh:
                 line = line.strip()
                 if line and "@" in line:
                     emails.append(line.lower())
-    # dedupe
     seen = set()
     out = []
     for e in emails:
@@ -115,11 +59,6 @@ def append_result(path: str, email: str, status: str, risk_score, raw_json: str)
         writer.writerow([email, status, risk_score, raw_json])
 
 def finalize_job_and_refund(db_session, job: BulkJob, estimated_cost: Decimal, actual_count: int):
-    """
-    Compute actual_cost = cost_per_email * actual_count
-    refund = estimated_cost - actual_cost
-    Add credits for refund if > 0 and update job stats (already updated during processing)
-    """
     per_cost = _dec(get_cost_for_key("verify.bulk_per_email") or 0)
     actual_cost = (per_cost * Decimal(actual_count)).quantize(Decimal("0.000001"))
     refund = (estimated_cost - actual_cost).quantize(Decimal("0.000001")) if estimated_cost > actual_cost else Decimal("0")
@@ -128,6 +67,16 @@ def finalize_job_and_refund(db_session, job: BulkJob, estimated_cost: Decimal, a
             add_credits(job.user_id, refund, reference=f"{job.job_id}:refund_after_processing")
         except Exception:
             logger.exception("refund failed for job %s", job.job_id)
+    # upload to S3 if configured
+    try:
+        if job.output_path and job.output_path.startswith("/"):
+            remote_key = f"bulk_results/{os.path.basename(job.output_path)}"
+            remote_url = upload_file_local_or_s3(job.output_path, remote_key)
+            if remote_url and remote_url != job.output_path:
+                job.output_path = remote_url
+                db_session.add(job); db_session.commit(); db_session.refresh(job)
+    except Exception:
+        logger.exception("s3 upload in finalize failed")
     # send webhook if configured
     if job.webhook_url:
         payload = {
@@ -145,13 +94,28 @@ def finalize_job_and_refund(db_session, job: BulkJob, estimated_cost: Decimal, a
             logger.exception("webhook enqueue failed for %s", job.job_id)
 
 def process_chunk(emails_chunk: List[str], output_path: str):
-    """
-    Process a small chunk, return tuple(valid_count, invalid_count, processed_count)
-    """
     vcount = 0
     icount = 0
     pcount = 0
     for email in emails_chunk:
+        domain = email.split("@",1)[-1] if "@" in email else None
+        # check and observe backoff delay for domain
+        backoff = get_backoff_seconds(domain) if domain else 0
+        if backoff and backoff > 0:
+            time.sleep(min(backoff, 10))  # small sleep to respect polite backoff
+        # attempt to acquire slot
+        got = acquire_slot(domain) if domain else True
+        if not got:
+            # if slot not available, wait short and retry once
+            time.sleep(1)
+            got = acquire_slot(domain) if domain else True
+            if not got:
+                # treat as temporary skip: mark as invalid here and continue
+                append_result(output_path, email, "skipped_throttle", None, "domain_throttle")
+                icount += 1
+                pcount += 1
+                continue
+
         try:
             res = verify_email_sync(email)
             status = res.get("status", "unknown")
@@ -161,13 +125,29 @@ def process_chunk(emails_chunk: List[str], output_path: str):
             pcount += 1
             if status == "valid":
                 vcount += 1
+                clear_backoff(domain)
             else:
                 icount += 1
+                # if temporary/greylist style (400-499) we bump backoff
+                rc = res.get("rcpt_response_code")
+                if rc and 400 <= int(rc) < 500:
+                    increase_backoff(domain)
         except Exception as e:
             logger.exception("verify failed for %s: %s", email, e)
             append_result(output_path, email, "error", None, str(e))
             pcount += 1
             icount += 1
+            # on exception, increase backoff for domain
+            try:
+                increase_backoff(domain)
+            except:
+                pass
+        finally:
+            # release slot regardless
+            try:
+                release_slot(domain)
+            except:
+                pass
     return vcount, icount, pcount
 
 def process_bulk_job(job_id: str, estimated_cost: Decimal):
@@ -191,24 +171,19 @@ def process_bulk_job(job_id: str, estimated_cost: Decimal):
         job.output_path = output_path
         db.add(job); db.commit(); db.refresh(job)
 
-        # process in chunks
-        chunks = math.ceil(total / CHUNK_SIZE) if CHUNK_SIZE > 0 else 1
         processed = 0
         valid = 0
         invalid = 0
         for i in range(0, total, CHUNK_SIZE):
             chunk = emails[i:i+CHUNK_SIZE]
-            # simple backoff for heavy hosts — could add adaptive backoff logic here
             try:
                 v, ic, p = process_chunk(chunk, output_path)
             except Exception as e:
                 logger.exception("process_chunk failed: %s", e)
-                # conservative: mark all chunk as processed but failed
                 v, ic, p = 0, len(chunk), len(chunk)
             processed += p
             valid += v
             invalid += ic
-            # update DB after each chunk
             job.processed = processed
             job.valid = valid
             job.invalid = invalid
@@ -217,7 +192,6 @@ def process_bulk_job(job_id: str, estimated_cost: Decimal):
         job.status = "completed"
         db.add(job); db.commit(); db.refresh(job)
 
-        # finalize: compute refunds & send webhook
         finalize_job_and_refund(db, job, estimated_cost, actual_count=total)
 
     except Exception as e:
@@ -230,4 +204,3 @@ def process_bulk_job(job_id: str, estimated_cost: Decimal):
             pass
     finally:
         db.close()
-
