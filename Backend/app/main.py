@@ -84,3 +84,9 @@ else:
 @app.get("/")
 def root():
     return {"status": "ok", "service": "backend", "version": "1.0.0"}
+
+
+from backend.app.api.v1 import admin_analytics
+app.include_router(admin_analytics.router)
+
+
