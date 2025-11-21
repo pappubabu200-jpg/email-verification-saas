@@ -1,68 +1,34 @@
-from fastapi import APIRouter, Depends, Request, Header, HTTPException
-from pydantic import BaseModel
-from decimal import Decimal
-import os
-
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException
+from backend.app.services.plan_service import get_all_plans, get_plan_by_name
+from backend.app.utils.security import get_current_admin
 from backend.app.db import SessionLocal
-from backend.app.utils.security import get_current_user
-from backend.app.services.billing_service import create_stripe_checkout_session, handle_stripe_payment_intent
-from backend.app.services.credits_service import get_balance, add_credits
-from backend.app.models.credit_transaction import CreditTransaction
+from backend.app.models.user import User
 
-router = APIRouter(prefix="/v1/billing", tags=["Billing"])
+router = APIRouter(prefix="/api/v1/billing", tags=["billing"])
 
+@router.get("/plans")
+def list_plans():
+    plans = get_all_plans()
+    return [{"name": p.name, "display_name": p.display_name, "monthly_price_usd": float(p.monthly_price_usd), "daily_search_limit": p.daily_search_limit} for p in plans]
 
-def get_db():
+@router.post("/users/{user_id}/assign-plan")
+def assign_plan(user_id: int, plan_name: str, admin = Depends(get_current_admin)):
     db = SessionLocal()
     try:
-        yield db
+        user = db.query(User).get(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="user_not_found")
+        plan = get_plan_by_name(plan_name)
+        if not plan:
+            raise HTTPException(status_code=404, detail="plan_not_found")
+        # Set plan on user. You must have user.plan or user.plan_id column. We use user.plan string if available.
+        if hasattr(user, "plan"):
+            user.plan = plan.name
+        else:
+            # add plan_name field to user if not present is needed (migration)
+            user.plan = plan.name
+        db.add(user)
+        db.commit()
+        return {"ok": True, "user_id": user.id, "plan": plan.name}
     finally:
         db.close()
-
-
-class TopupIn(BaseModel):
-    amount_in_inr: int
-    credits: Decimal = None
-
-
-@router.post("/topup")
-def topup(payload: TopupIn, current_user = Depends(get_current_user)):
-    """
-    Initiate a Stripe Checkout Session (test mode). Provide success/cancel URLs as env or query in real app.
-    Returns session url (client should redirect).
-    NOTE: requires STRIPE_SECRET_KEY in .env.
-    """
-    session = create_stripe_checkout_session(payload.amount_in_inr, currency="inr")
-    return session
-
-
-@router.get("/balance")
-def balance(current_user = Depends(get_current_user), db: Session = Depends(get_db)):
-    bal = get_balance(db, current_user.id)
-    return {"balance": float(bal)}
-
-
-@router.post("/webhook")
-async def stripe_webhook(request: Request, stripe_signature: str = Header(None)):
-    """
-    Generic webhook endpoint for Stripe (you should verify signature in prod).
-    This route will call billing_service.handle_stripe_payment_intent and credit the user if metadata present.
-    """
-    payload = await request.body()
-    # try to parse JSON
-    try:
-        event = await request.json()
-    except Exception:
-        # fallback parse from raw
-        import json
-        event = json.loads(payload.decode("utf-8", errors="ignore"))
-
-    # If STRIPE_WEBHOOK_SECRET set, verify signature (not implemented here, keep simple)
-    try:
-        handled = handle_stripe_payment_intent(event)
-        if handled:
-            return {"status": "ok"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    return {"status": "ignored"}
