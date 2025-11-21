@@ -14,3 +14,4 @@ class UsageLog(Base):
     ip = Column(String(100), nullable=True)
     user_agent = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
