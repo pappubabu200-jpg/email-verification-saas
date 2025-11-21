@@ -509,3 +509,46 @@ def admin_reset_all(admin=Depends(get_current_admin)):
     return {"status": "ok", "message": "all api keys usage reset"}
 
 
+@router.post("/api-keys/{key_id}/reset-usage")
+def reset_api_key_usage(key_id: int, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    from backend.app.services.api_key_service import reset_usage
+
+    out = reset_usage(db, key_id)
+    return out
+
+@router.get("/api-keys")
+def list_api_keys(admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    ApiKey = __import__("backend.app.models.api_key", fromlist=["ApiKey"]).ApiKey
+
+    rows = db.query(ApiKey).order_by(ApiKey.id.desc()).all()
+    return [
+        {
+            "id": r.id,
+            "user_id": r.user_id,
+            "active": r.active,
+            "daily_limit": r.daily_limit,
+            "used_today": r.used_today,
+            "created_at": str(r.created_at),
+        }
+        for r in rows
+                                  ]
+
+    @router.get("/api-keys/{key_id}")
+def get_api_key_details(key_id: int, admin = Depends(get_current_admin)):
+    db = SessionLocal()
+    ApiKey = __import__("backend.app.models.api_key", fromlist=["ApiKey"]).ApiKey
+
+    row = db.query(ApiKey).get(key_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="not_found")
+
+    return {
+        "id": row.id,
+        "user_id": row.user_id,
+        "active": row.active,
+        "daily_limit": row.daily_limit,
+        "used_today": row.used_today,
+        "created_at": str(row.created_at),
+    }
