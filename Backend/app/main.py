@@ -103,5 +103,10 @@ app.add_middleware(TeamContextMiddleware)
 from backend.app.middleware.team_acl import TeamACL
 app.add_middleware(TeamACL)
 
+from backend.app.api.v1 import team
+app.include_router(team.router)
+
+
+
 
 
