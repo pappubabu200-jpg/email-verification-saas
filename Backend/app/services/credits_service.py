@@ -215,3 +215,76 @@ def release_reservation_by_job(job_id: str):
         return True
     finally:
         db.close()
+
+
+# append to backend/app/services/credits_service.py
+
+from backend.app.models.credit_reservation import CreditReservation
+from backend.app.models.credit_transaction import CreditTransaction
+from decimal import Decimal
+from fastapi import HTTPException
+import logging
+logger = logging.getLogger(__name__)
+
+def capture_reservation_and_charge(reservation_id: int, type_: str = "charge", reference: str = None) -> CreditTransaction:
+    """
+    Capture a locked reservation and convert into a real debit transaction.
+    """
+    db = SessionLocal()
+    try:
+        res = db.get(CreditReservation, reservation_id)
+        if not res or not res.locked:
+            raise HTTPException(status_code=404, detail="reservation_not_found_or_not_locked")
+        # compute current balance
+        # We assume user.credits contains current balance OR transactions present.
+        user = db.query(User).get(res.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="user_not_found")
+        current_balance = Decimal(getattr(user, "credits", 0) or 0)
+        new_balance = current_balance - Decimal(res.amount)
+        if new_balance < 0:
+            # This should not happen if reservation was validated, but guard anyway.
+            raise HTTPException(status_code=402, detail="insufficient_credits")
+        # update user balance if field exists
+        if hasattr(user, "credits"):
+            user.credits = float(new_balance)
+            db.add(user)
+        tx = CreditTransaction(
+            user_id=res.user_id,
+            amount = -Decimal(res.amount),
+            balance_after = new_balance,
+            type = type_,
+            reference = reference or res.reference
+        )
+        res.locked = False
+        db.add(tx)
+        db.add(res)
+        db.commit()
+        db.refresh(tx)
+        return tx
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("capture_reservation_and_charge failed: %s", e)
+        raise HTTPException(status_code=500, detail="capture_failed")
+    finally:
+        db.close()
+
+def release_reservation_by_job(job_id: str) -> int:
+    """
+    Release (unlock) all reservations for a job_id and return count released.
+    """
+    db = SessionLocal()
+    try:
+        rows = db.query(CreditReservation).filter(CreditReservation.job_id == job_id, CreditReservation.locked == True).all()
+        cnt = 0
+        for r in rows:
+            r.locked = False
+            db.add(r)
+            cnt += 1
+        db.commit()
+        return cnt
+    finally:
+        db.close()
+
+
