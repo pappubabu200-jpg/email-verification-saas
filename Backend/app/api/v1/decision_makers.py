@@ -254,4 +254,52 @@ def search(payload: DecisionSearchIn, request: Request, current_user = Depends(g
         "results": results
     }
 
+@router.post("/search", response_model=Dict[str, Any])
+def search(payload: DecisionSearchIn, request: Request, current_user = Depends(get_current_user)):
+    user = current_user
+    if not user:
+        raise HTTPException(status_code=401, detail="auth_required")
 
+    caller_api_key = getattr(request.state, "api_key_row", None).key if getattr(request.state, "api_key_row", None) else None
+    plan = get_plan_by_name(getattr(user, "plan", None)) if hasattr(user, "plan") else None
+
+    # pricing/reserve
+    cost_per_result = Decimal(str(get_cost_for_key("decision_maker.search_per_result") or 0))
+    estimated_cost = (cost_per_result * Decimal(payload.max_results)).quantize(Decimal("0.000001"))
+
+    job_id = f"dmjob-{uuid.uuid4().hex[:12]}"
+    try:
+        reserve_res = reserve_and_deduct(user.id, estimated_cost, reference=f"{job_id}:reserve", job_id=job_id)
+    except HTTPException as e:
+        raise
+
+    # run search (may call PDL/Apollo)
+    try:
+        results = search_decision_makers(domain=payload.domain, company_name=payload.company, max_results=payload.max_results, use_cache=payload.use_cache, caller_api_key=caller_api_key)
+    except Exception:
+        add_credits(user.id, estimated_cost, reference=f"{job_id}:refund_on_error")
+        raise HTTPException(status_code=500, detail="decision_search_failed")
+
+    actual_count = len(results or [])
+    actual_cost = (cost_per_result * Decimal(actual_count)).quantize(Decimal("0.000001"))
+
+    # refund difference (if any)
+    if actual_cost < estimated_cost:
+        refund_amount = (estimated_cost - actual_cost).quantize(Decimal("0.000001"))
+        from backend.app.services.team_billing_service import add_team_credits as _add_team_credits
+        team_id = getattr(request.state, "team_id", None)
+        if team_id:
+            try:
+                _add_team_credits(team_id, refund_amount, reference=f"{job_id}:refund")
+            except Exception:
+                pass
+        else:
+            add_credits(user.id, refund_amount, reference=f"{job_id}:refund")
+
+    return {
+        "job_id": job_id,
+        "returned_results": actual_count,
+        "actual_cost": float(actual_cost),
+        "refund_amount": float((estimated_cost - actual_cost) if estimated_cost > actual_cost else 0),
+        "results": results
+}
