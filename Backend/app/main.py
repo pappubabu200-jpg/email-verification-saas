@@ -175,3 +175,8 @@ def ready():
     status = 200 if all(v == "ok" or v == "disabled_or_fallback" or v == "missing_bucket" for v in checks.values()) else 503
     return JSONResponse(status_code=status, content={"status":"ready" if status==200 else "not_ready", "checks": checks})
 
+from backend.app.services.plan_service import seed_default_plans
+@app.on_event("startup")
+def on_start():
+    seed_default_plans()
+
