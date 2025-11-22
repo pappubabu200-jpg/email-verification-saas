@@ -28,3 +28,12 @@ class TeamMember(Base, IdMixin, TimestampMixin):
     role = Column(String(50), default="member")  # owner|admin|member
     is_active = Column(Boolean, default=True)
 
+from sqlalchemy import Column, Integer, String, ForeignKey
+from backend.app.db import Base
+from backend.app.models.base import IdMixin, TimestampMixin
+
+class TeamMember(Base, IdMixin, TimestampMixin):
+    __tablename__ = "team_members"
+    team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(String(50), default="member", nullable=False)
