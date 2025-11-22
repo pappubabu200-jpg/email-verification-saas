@@ -1,4 +1,4 @@
-version: "3.8"
+  version: "3.8"
 services:
   postgres:
     image: postgres:15
@@ -21,6 +21,11 @@ services:
     volumes:
       - redisdata:/data
     command: ["redis-server", "--save", "60", "1"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   minio:
     image: minio/minio:RELEASE.2025-01-01T00-00-00Z
@@ -33,7 +38,7 @@ services:
     ports:
       - "9000:9000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live || exit 1"]
       interval: 30s
       retries: 3
 
@@ -41,7 +46,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    restart: always
+    restart: unless-stopped
     env_file:
       - ./backend/.env.prod
     ports:
@@ -55,7 +60,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: celery -A backend.app.celery_app.celery_app worker --loglevel=info --concurrency=2
+    command: celery -A backend.app.celery_app.celery_app worker --loglevel=info --concurrency=4
     env_file:
       - ./backend/.env.prod
     depends_on:
