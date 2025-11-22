@@ -15,3 +15,24 @@ class CreditTransaction(Base, IdMixin, TimestampMixin):
 
     def __repr__(self):
         return f"<CreditTransaction id={self.id} user={self.user_id} amount={self.amount} balance_after={self.balance_after}>"
+# backend/app/models/credit_transaction.py
+
+from sqlalchemy import Column, Integer, Numeric, String, DateTime, ForeignKey
+from sqlalchemy.sql import func
+from backend.app.db import Base
+
+class CreditTransaction(Base):
+    __tablename__ = "credit_transactions"
+
+    id = Column(Integer, primary_key=True)
+    
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)  # NEW FIELD
+
+    amount = Column(Numeric(18, 6), nullable=False)
+    balance_after = Column(Numeric(18, 6), nullable=False)
+    type = Column(String(50), nullable=False)  # credit, debit
+    reference = Column(String(255), nullable=True)
+    metadata = Column(String(500), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
