@@ -548,4 +548,100 @@ async def bulk_extract(file: UploadFile = File(...), request: Request = None, te
         "results_preview": results[:200]
             }
 
+# backend/app/api/v1/extractor.py
+import io
+import uuid
+import csv
+import zipfile
+import logging
+from decimal import Decimal, ROUND_HALF_UP
+from typing import List, Dict, Any, Optional
 
+from fastapi import APIRouter, Request, Depends, UploadFile, File, HTTPException
+from pydantic import BaseModel
+from backend.app.utils.security import get_current_user
+from backend.app.services.pricing_service import get_cost_for_key
+from backend.app.services.credits_service import reserve_and_deduct, add_credits, get_user_balance
+from backend.app.services.team_billing_service import add_team_credits
+from backend.app.services.plan_service import get_plan_by_name
+from backend.app.services.minio_client import client as minio_client, MINIO_BUCKET, ensure_bucket
+from backend.app.config import settings
+
+# extraction engine (assumed to exist)
+try:
+    from backend.app.services.extractor_engine import extract_url
+except Exception:
+    extract_url = None
+
+router = APIRouter(prefix="/api/v1/extractor", tags=["extractor"])
+logger = logging.getLogger(__name__)
+
+def _dec(x) -> Decimal:
+    return Decimal(str(x)).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+
+class SingleExtractIn(BaseModel):
+    url: str
+    parse_links: Optional[bool] = False
+    team_id: Optional[int] = None
+
+@router.post("/single")
+def single_extract(payload: SingleExtractIn, request: Request, current_user = Depends(get_current_user)):
+    user = current_user
+    if not user:
+        raise HTTPException(status_code=401, detail="auth_required")
+
+    chosen_team = payload.team_id or getattr(request.state, "team_id", None)
+
+    cost_per = _dec(get_cost_for_key("extractor.single_page") or 0)
+    estimated_cost = cost_per
+    job_id = f"ext-{uuid.uuid4().hex[:12]}"
+    reserve_ref = f"{job_id}:reserve"
+
+    # Reserve
+    try:
+        reserve_res = reserve_and_deduct(user.id, estimated_cost, reference=reserve_ref, team_id=chosen_team, job_id=job_id) if estimated_cost > 0 else {"balance_after": float(get_user_balance(user.id))}
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+    # Extract
+    try:
+        if extract_url:
+            res = extract_url(payload.url, parse_links=payload.parse_links)
+        else:
+            res = {"url": payload.url, "emails": [], "links_found": []}
+    except Exception as e:
+        # refund
+        try:
+            add_credits(user.id, estimated_cost, reference=f"{job_id}:refund_on_error")
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="extraction_failed")
+
+    # optionally refund if no emails
+    refund_amount = Decimal("0")
+    try:
+        emails_found = 0
+        if isinstance(res, dict) and res.get("emails"):
+            emails_found = len(res.get("emails") or [])
+        if emails_found == 0 and estimated_cost > 0:
+            refund_amount = (estimated_cost * Decimal("0.5")).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+            if chosen_team:
+                try:
+                    add_team_credits(chosen_team, refund_amount, reference=f"{job_id}:partial_refund_no_emails")
+                except Exception:
+                    add_credits(user.id, refund_amount, reference=f"{job_id}:partial_refund_no_emails_fallback")
+            else:
+                add_credits(user.id, refund_amount, reference=f"{job_id}:partial_refund_no_emails")
+    except Exception:
+        logger.exception("post-charge refund logic failed for %s", job_id)
+
+    return {
+        "job_id": job_id,
+        "url": payload.url,
+        "result": res,
+        "estimated_cost": float(estimated_cost),
+        "actual_cost": float(estimated_cost - refund_amount),
+        "refund_amount": float(refund_amount),
+        "reserve_tx": reserve_res
+    }
+    
