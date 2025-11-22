@@ -92,3 +92,5 @@ def reserve_and_deduct(user_id: int, amount: Decimal, reference: str=None, team_
         raise HTTPException(status_code=500, detail="credit_error")
     finally:
         db.close()
+
+from backend.app.services.credits_service import add_credits
