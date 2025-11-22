@@ -356,3 +356,105 @@ def capture_team_reservation(reservation_id: int, type_: str = "team_charge", re
         return {"transaction_id": tx.id, "balance_after": float(team.credits)}
     finally:
         db.close()
+
+# backend/app/services/team_billing_service.py
+from backend.app.db import SessionLocal
+from backend.app.models.team import Team
+from backend.app.models.team_member import TeamMember
+from backend.app.models.team_credit_transaction import TeamCreditTransaction
+from backend.app.models.credit_reservation import CreditReservation
+from backend.app.models.credit_transaction import CreditTransaction
+from decimal import Decimal
+from fastapi import HTTPException
+import logging
+from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
+
+RESERVATION_TTL_SECONDS = 60 * 60  # 1 hour
+
+def get_team_balance(team_id: int) -> Decimal:
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        return Decimal(getattr(t, "credits", 0) or 0)
+    finally:
+        db.close()
+
+def add_team_credits(team_id: int, amount: Decimal, reference: str = None) -> dict:
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        cur = Decimal(getattr(t, "credits", 0) or 0)
+        new = cur + Decimal(amount)
+        t.credits = float(new)
+        tx = TeamCreditTransaction(team_id=team_id, amount=float(amount), balance_after=float(new), reference=reference or "")
+        db.add(tx); db.add(t); db.commit(); db.refresh(tx)
+        return {"balance_after": float(new), "transaction_id": tx.id}
+    finally:
+        db.close()
+
+def is_user_member_of_team(user_id: int, team_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        tm = db.query(TeamMember).filter(TeamMember.team_id == team_id, TeamMember.user_id == user_id).first()
+        return bool(tm)
+    finally:
+        db.close()
+
+def reserve_and_deduct_team(team_id: int, amount: Decimal, reference: str = None, job_id: str = None) -> dict:
+    """
+    Reserve credits from team pool (create CreditReservation row linked to team via reference).
+    """
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        balance = Decimal(getattr(t, "credits", 0) or 0)
+        if balance < amount:
+            raise HTTPException(status_code=402, detail="insufficient_credits")
+        expires_at = datetime.utcnow() + timedelta(seconds=RESERVATION_TTL_SECONDS)
+        # create CreditReservation with user_id = None and reference team:<team_id>
+        res = CreditReservation(user_id=None, amount=amount, job_id=job_id, locked=True, expires_at=expires_at, reference=f"team:{team_id}:{reference or ''}")
+        db.add(res)
+        # subtract from team balance now (we lock immediately)
+        t.credits = float(balance - amount)
+        db.add(t)
+        db.commit(); db.refresh(res)
+        return {"reservation_id": res.id, "reserved_amount": float(amount), "team_id": team_id}
+    finally:
+        db.close()
+
+def capture_team_reservation(reservation_id: int, type_: str = "team_charge", reference: str = None) -> dict:
+    """
+    Capture a team reservation by creating a TeamCreditTransaction (or TeamCharge).
+    """
+    db = SessionLocal()
+    try:
+        res = db.query(CreditReservation).get(reservation_id)
+        if not res or not res.locked:
+            raise HTTPException(status_code=404, detail="reservation_not_found_or_not_locked")
+        # decode team id from reference if present
+        team_hint = (res.reference or "").split(":")
+        team_id = None
+        if len(team_hint) >= 2 and team_hint[0] == "team":
+            try:
+                team_id = int(team_hint[1])
+            except Exception:
+                team_id = None
+        # create team transaction record (TeamCreditTransaction) if model exists
+        # If you don't have TeamCreditTransaction model, create a simple generic log (or reuse CreditTransaction with user_id None)
+        tr = TeamCreditTransaction(team_id=team_id, amount=-float(res.amount), balance_after=0.0, type=type_, reference=reference or res.reference)
+        # update team balance already decreased at reservation point
+        res.locked = False
+        db.add(tr); db.add(res); db.commit(); db.refresh(tr)
+        return {"transaction_id": tr.id}
+    finally:
+        db.close()
+
+
