@@ -111,3 +111,91 @@ def list_team_transactions(team_id: int, limit: int = 50):
         return rows
     finally:
         db.close()
+
+
+# backend/app/services/team_billing_service.py
+from decimal import Decimal
+from backend.app.db import SessionLocal
+from backend.app.models.team import Team
+from backend.app.models.credit_transaction import CreditTransaction
+from backend.app.models.credit_reservation import CreditReservation
+from fastapi import HTTPException
+from datetime import datetime, timedelta
+import logging
+
+logger = logging.getLogger(__name__)
+
+RESERVATION_TTL_SECONDS = 60 * 60  # 1 hour
+
+def get_team_balance(team_id: int) -> Decimal:
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        return Decimal(t.credits or 0)
+    finally:
+        db.close()
+
+def add_team_credits(team_id: int, amount: Decimal, reference: str = None) -> dict:
+    """
+    Top-up team pool by writing a transaction row and updating Team.credits atomically.
+    """
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        prev = Decimal(t.credits or 0)
+        new = prev + Decimal(amount)
+        t.credits = float(new)
+        db.add(t)
+        tx = CreditTransaction(user_id=None, amount=float(amount), balance_after=new, type="team_credit", reference=reference or f"team_topup:{team_id}")
+        # store team id in reference or metadata (we reuse CreditTransaction.user_id == None for team tx)
+        db.add(tx)
+        db.commit()
+        db.refresh(tx)
+        return {"balance_after": float(new), "transaction_id": tx.id}
+    except Exception as e:
+        logger.exception("add_team_credits failed: %s", e)
+        raise HTTPException(status_code=500, detail="team_credit_error")
+    finally:
+        db.close()
+
+def reserve_and_deduct_team(team_id: int, amount: Decimal, job_id: str = None, reference: str = None) -> dict:
+    """
+    Reserve and charge from the team pool atomically.
+    Returns transaction dict similar to reserve_and_deduct user.
+    Raises HTTPException(402) if insufficient.
+    """
+    db = SessionLocal()
+    try:
+        t = db.query(Team).with_for_update().get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        balance = Decimal(t.credits or 0)
+        if balance < amount:
+            raise HTTPException(status_code=402, detail="team_insufficient_credits")
+        new_balance = balance - Decimal(amount)
+        t.credits = float(new_balance)
+        db.add(t)
+        tx = CreditTransaction(user_id=None, amount=float(-amount), balance_after=new_balance, type="team_debit", reference=reference or f"team_charge:{team_id}")
+        db.add(tx)
+        db.commit()
+        db.refresh(tx)
+        return {"balance_after": float(new_balance), "transaction_id": tx.id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("reserve_and_deduct_team failed: %s", e)
+        raise HTTPException(status_code=500, detail="team_charge_error")
+    finally:
+        db.close()
+
+def refund_to_team(team_id: int, amount: Decimal, reference: str = None) -> dict:
+    """
+    Refund amount back to team credits (adds a positive tx).
+    """
+    return add_team_credits(team_id, amount, reference=reference)
+
+
