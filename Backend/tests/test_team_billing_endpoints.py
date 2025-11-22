@@ -112,3 +112,45 @@ def test_bulk_submit_requires_file_and_reserves(monkeypatch):
     data = resp.json()
     assert "job_id" in data
     assert data["total"] >= 1
+
+# backend/tests/test_team_billing.py
+import pytest
+from decimal import Decimal
+from backend.app.db import SessionLocal, init_db
+from backend.app.models.user import User
+from backend.app.models.team import Team
+from backend.app.services.team_billing_service import add_team_credits, get_team_balance, reserve_and_deduct_team, capture_team_reservation
+
+@pytest.fixture(scope="module")
+def db_setup():
+    init_db()
+    db = SessionLocal()
+    yield db
+    db.close()
+
+def test_team_topup_and_reserve(db_setup):
+    db = db_setup
+    u = User(email="owner@example.com", hashed_password="x", is_active=True)
+    db.add(u); db.commit(); db.refresh(u)
+
+    # create team
+    t = Team(name=f"test-team-{u.id}", owner_id=u.id, credits=0)
+    db.add(t); db.commit(); db.refresh(t)
+
+    # topup team
+    res = add_team_credits(t.id, Decimal("100.0"), reference="test_topup")
+    assert res["balance_after"] >= 100.0
+
+    # reserve
+    r = reserve_and_deduct_team(t.id, Decimal("10.0"), reference="test_reserve", job_id="job-test")
+    assert "reservation_id" in r
+
+    # capture reservation
+    tx = capture_team_reservation(r["reservation_id"], type_="test_charge", reference="test_capture")
+    assert "transaction_id" in tx
+
+    # final balance: <= 90
+    b = get_team_balance(t.id)
+    assert Decimal(b) <= Decimal("90.0")
+
+
