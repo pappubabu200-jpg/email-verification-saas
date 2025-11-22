@@ -261,4 +261,50 @@ def add_member(team_id: int, user_id: int, role: str = "member"):
         db.close()
 
 
+from backend.app.db import SessionLocal
+from backend.app.models.team_member import TeamMember
+from backend.app.models.team import Team
+from backend.app.models.user import User
+from fastapi import HTTPException
+
+def is_user_member_of_team(user_id: int, team_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        m = db.query(TeamMember).filter(TeamMember.team_id == team_id, TeamMember.user_id == user_id).first()
+        return bool(m)
+    finally:
+        db.close()
+
+def get_team(team_id: int):
+    db = SessionLocal()
+    try:
+        return db.query(Team).get(team_id)
+    finally:
+        db.close()
+
+def create_team(name: str, owner_id: int):
+    db = SessionLocal()
+    try:
+        t = Team(name=name, owner_id=owner_id, credits=0)
+        db.add(t)
+        db.commit()
+        db.refresh(t)
+        # add owner as member
+        tm = TeamMember(team_id=t.id, user_id=owner_id, role="owner")
+        db.add(tm); db.commit()
+        return t
+    finally:
+        db.close()
+
+def add_member(team_id: int, user_id: int, role: str = "member"):
+    db = SessionLocal()
+    try:
+        if is_user_member_of_team(user_id, team_id):
+            return True
+        tm = TeamMember(team_id=team_id, user_id=user_id, role=role)
+        db.add(tm)
+        db.commit()
+        return True
+    finally:
+        db.close()
 
