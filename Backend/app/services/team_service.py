@@ -212,3 +212,53 @@ def remove_member(team_id: int, user_id: int) -> bool:
 
 
 
+# backend/app/services/team_service.py
+
+from backend.app.db import SessionLocal
+from backend.app.models.team import Team
+from backend.app.models.team_member import TeamMember
+from fastapi import HTTPException
+import logging
+
+logger = logging.getLogger(__name__)
+
+def is_user_member_of_team(user_id: int, team_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        q = db.query(TeamMember).filter(
+            TeamMember.team_id == team_id,
+            TeamMember.user_id == user_id,
+            TeamMember.is_active == True
+        ).first()
+        return q is not None
+    finally:
+        db.close()
+
+def create_team(owner_id: int, name: str, slug: str = None):
+    db = SessionLocal()
+    try:
+        team = Team(owner_id=owner_id, name=name, slug=slug)
+        db.add(team)
+        db.commit()
+        db.refresh(team)
+
+        member = TeamMember(team_id=team.id, user_id=owner_id, role="owner")
+        db.add(member)
+        db.commit()
+
+        return team
+    finally:
+        db.close()
+
+def add_member(team_id: int, user_id: int, role: str = "member"):
+    db = SessionLocal()
+    try:
+        m = TeamMember(team_id=team_id, user_id=user_id, role=role)
+        db.add(m)
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+
