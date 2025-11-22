@@ -303,3 +303,109 @@ def search(payload: DecisionSearchIn, request: Request, current_user = Depends(g
         "refund_amount": float((estimated_cost - actual_cost) if estimated_cost > actual_cost else 0),
         "results": results
 }
+
+
+# backend/app/api/v1/decision_makers.py
+from fastapi import APIRouter, Request, Depends, HTTPException
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+import uuid
+from decimal import Decimal, ROUND_HALF_UP
+
+from backend.app.db import SessionLocal
+from backend.app.services.decision_maker_service import search_decision_makers
+from backend.app.services.pricing_service import get_cost_for_key
+from backend.app.services.credits_service import reserve_and_deduct, add_credits, get_user_balance
+from backend.app.services.team_billing_service import add_team_credits
+from backend.app.services.plan_service import get_plan_by_name
+from backend.app.utils.security import get_current_user
+
+router = APIRouter(prefix="/api/v1/decision-makers", tags=["decision-makers"])
+
+def _dec(x) -> Decimal:
+    return Decimal(str(x)).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+
+
+class DecisionSearchIn(BaseModel):
+    domain: Optional[str] = None
+    company: Optional[str] = None
+    max_results: int = 25
+    use_cache: bool = True
+    team_id: Optional[int] = None
+
+
+@router.post("/search")
+def search(payload: DecisionSearchIn, request: Request, current_user = Depends(get_current_user)):
+    user = current_user
+    if not user:
+        raise HTTPException(status_code=401, detail="auth_required")
+
+    chosen_team = payload.team_id or getattr(request.state, "team_id", None)
+
+    # enforce plan daily_search_limit
+    if hasattr(user, "plan") and user.plan:
+        plan = get_plan_by_name(user.plan)
+        if plan and plan.daily_search_limit and payload.max_results > plan.daily_search_limit:
+            raise HTTPException(status_code=429, detail=f"max_results_exceeds_plan_limit ({plan.daily_search_limit})")
+
+    cost_per_result = _dec(get_cost_for_key("decision_maker.search_per_result") or 0)
+    estimated_cost = (cost_per_result * Decimal(payload.max_results)).quantize(Decimal("0.000001"))
+
+    job_id = f"dmjob-{uuid.uuid4().hex[:12]}"
+    reserve_ref = f"{job_id}:reserve"
+
+    # Reserve credits (team-first)
+    try:
+        reserve_res = reserve_and_deduct(user.id, estimated_cost, reference=reserve_ref, team_id=chosen_team, job_id=job_id)
+    except HTTPException as e:
+        raise e
+
+    # perform search
+    try:
+        api_key_row = getattr(request.state, "api_key_row", None)
+        caller_api_key = api_key_row.key if api_key_row else None
+
+        results = search_decision_makers(domain=payload.domain, company_name=payload.company, max_results=payload.max_results, use_cache=payload.use_cache, caller_api_key=caller_api_key)
+    except Exception as e:
+        # refund on error
+        try:
+            add_credits(user.id, estimated_cost, reference=f"{job_id}:refund_on_error")
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="decision_search_failed")
+
+    actual_count = len(results or [])
+    actual_cost = (cost_per_result * Decimal(actual_count)).quantize(Decimal("0.000001"))
+    refund_amount = (estimated_cost - actual_cost).quantize(Decimal("0.000001")) if estimated_cost > actual_cost else Decimal("0")
+
+    # issue refund to team or user accordingly
+    if refund_amount > 0:
+        if chosen_team:
+            try:
+                add_team_credits(chosen_team, refund_amount, reference=f"{job_id}:refund")
+            except Exception:
+                # best-effort: if team refund fails, refund to user
+                try:
+                    add_credits(user.id, refund_amount, reference=f"{job_id}:refund_fallback")
+                except Exception:
+                    pass
+        else:
+            try:
+                add_credits(user.id, refund_amount, reference=f"{job_id}:refund")
+            except Exception:
+                pass
+
+    return {
+        "job_id": job_id,
+        "requested_max_results": payload.max_results,
+        "returned_results": actual_count,
+        "cost_per_result": float(cost_per_result),
+        "estimated_cost": float(estimated_cost),
+        "actual_cost": float(actual_cost),
+        "refund_amount": float(refund_amount),
+        "results": results,
+        "reserve_tx": reserve_res,
+    }
+
+
+
