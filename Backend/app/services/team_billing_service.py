@@ -199,3 +199,77 @@ def refund_to_team(team_id: int, amount: Decimal, reference: str = None) -> dict
     return add_team_credits(team_id, amount, reference=reference)
 
 
+# backend/app/services/team_billing_service.py
+
+from decimal import Decimal
+from fastapi import HTTPException
+from backend.app.db import SessionLocal
+from backend.app.models.team import Team
+from backend.app.models.credit_transaction import CreditTransaction
+import logging
+
+logger = logging.getLogger(__name__)
+
+def get_team_balance(team_id: int) -> Decimal:
+    db = SessionLocal()
+    try:
+        team = db.query(Team).get(team_id)
+        if not team:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        return Decimal(team.credits or 0)
+    finally:
+        db.close()
+
+def reserve_and_deduct_team(team_id: int, amount: Decimal, reference: str = None):
+    db = SessionLocal()
+    try:
+        team = db.query(Team).get(team_id)
+        if not team:
+            raise HTTPException(status_code=404, detail="team_not_found")
+
+        bal = Decimal(team.credits or 0)
+        if bal < amount:
+            raise HTTPException(status_code=402, detail="team_insufficient_credits")
+
+        new_balance = bal - amount
+        team.credits = float(new_balance)
+
+        tx = CreditTransaction(
+            team_id=team_id,
+            amount=-amount,
+            balance_after=new_balance,
+            type="debit",
+            reference=reference,
+        )
+        db.add(tx)
+        db.add(team)
+        db.commit()
+        return {"balance_after": float(new_balance), "transaction_id": tx.id}
+    finally:
+        db.close()
+
+def add_team_credits(team_id: int, amount: Decimal, reference: str = None):
+    db = SessionLocal()
+    try:
+        team = db.query(Team).get(team_id)
+        if not team:
+            raise HTTPException(status_code=404, detail="team_not_found")
+
+        new_balance = Decimal(team.credits or 0) + amount
+        team.credits = float(new_balance)
+
+        tx = CreditTransaction(
+            team_id=team_id,
+            amount=amount,
+            balance_after=new_balance,
+            type="credit",
+            reference=reference,
+        )
+        db.add(tx)
+        db.add(team)
+        db.commit()
+        return {"balance_after": float(new_balance), "transaction_id": tx.id}
+    finally:
+        db.close()
+
+
