@@ -196,3 +196,35 @@ def process_bulk_task(self, job_id: str, estimated_cost: float = 0.0):
         raise
     finally:
         db.close()
+
+from backend.app.services.credits_service import capture_reservation_and_charge, release_reservation_by_job
+
+# If you record reservation.job_id earlier when reserving, you can look it up:
+# reservations = db.query(CreditReservation).filter(CreditReservation.job_id==job.job_id, CreditReservation.locked==True).all()
+# For each res -> capture_reservation_and_charge(res.id)
+
+# Example (append after job processed):
+try:
+    # find reservations for this job
+    from backend.app.models.credit_reservation import CreditReservation
+    reservations = db.query(CreditReservation).filter(CreditReservation.job_id==job.job_id, CreditReservation.locked==True).all()
+    actual_cost = (Decimal(str(get_cost_for_key("verify.bulk_per_email") or 0)) * Decimal(processed)).quantize(Decimal("0.000001"))
+    # If many reservations exist, capture needed amount across them — simple approach: capture each in turn up to actual_cost
+    remain = actual_cost
+    for r in reservations:
+        if remain <= 0:
+            # release remaining reservations
+            release_reservation_by_job(job.job_id)
+            break
+        try:
+            # if r.amount <= remain -> capture whole reservation
+            capture_reservation_and_charge(r.id, type_="bulk_charge", reference=f"bulk:{job.job_id}")
+            remain -= Decimal(r.amount)
+        except Exception:
+            # cannot capture (something off) -> leave unlocked and continue
+            logger.exception("capture reservation %s failed", r.id)
+    # if remain < 0 (shouldn't), leave as is — admin can reconcile
+except Exception:
+    logger.exception("reservation finalize failed for job %s", job.job_id)
+
+
