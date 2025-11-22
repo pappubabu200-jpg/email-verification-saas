@@ -12,22 +12,23 @@ from fastapi import APIRouter, Request, Depends, UploadFile, File, HTTPException
 from backend.app.db import SessionLocal
 from backend.app.models.bulk_job import BulkJob
 from backend.app.services.pricing_service import get_cost_for_key
-from backend.app.services.credits_service import reserve_and_deduct, get_user_balance
+from backend.app.services.credits_service import reserve_and_deduct, get_user_balance, add_credits
 from backend.app.workers.bulk_tasks import process_bulk_task
 from backend.app.utils.security import get_current_user, get_current_admin
 from backend.app.config import settings
-from backend.app.services.minio_client import put_bytes, ensure_bucket, MINIO_BUCKET
-from decimal import Decimal
+
+# MinIO client helper
+from backend.app.services.minio_client import client as minio_client, MINIO_BUCKET, ensure_bucket
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/bulk", tags=["bulk"])
 
-# configure: how many seconds before reservation auto-expiry if you use reservations elsewhere
-INPUT_PREFIX = getattr(settings, "BULK_INPUT_PREFIX", "inputs")
-OUTPUT_PREFIX = getattr(settings, "BULK_OUTPUT_PREFIX", "outputs")
+INPUT_FOLDER = getattr(settings, "BULK_INPUT_FOLDER", "/tmp/bulk_inputs")
+os.makedirs(INPUT_FOLDER, exist_ok=True)
 
 def _dec(x) -> Decimal:
     return Decimal(str(x)).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+
 
 def _extract_emails_from_zip_bytes(content: bytes) -> List[str]:
     emails: List[str] = []
@@ -52,6 +53,7 @@ def _extract_emails_from_zip_bytes(content: bytes) -> List[str]:
                     emails.append(s)
     return emails
 
+
 def _extract_emails_from_csv_text(text: str) -> List[str]:
     emails: List[str] = []
     reader = csv.reader(io.StringIO(text))
@@ -63,6 +65,7 @@ def _extract_emails_from_csv_text(text: str) -> List[str]:
                 break
     return emails
 
+
 # ---- submit job endpoint ----
 @router.post("/submit")
 async def submit_bulk(
@@ -72,25 +75,55 @@ async def submit_bulk(
     team_id: Optional[int] = None,  # optional override from frontend
     current_user = Depends(get_current_user),
 ):
+    """
+    Submit a bulk verification job. Saves input to MinIO (preferred) or disk.
+    Reserves credits (team-first if team_id provided), creates BulkJob row with
+    job_id and estimated_cost and leaves processing to Celery worker.
+    """
     user = current_user
     if not user:
         raise HTTPException(status_code=401, detail="auth_required")
 
-    # decide team context (explicit override takes precedence)
     chosen_team = team_id or getattr(request.state, "team_id", None)
+
+    # validate team membership (best-effort)
+    if chosen_team:
+        try:
+            from backend.app.services.team_service import is_user_member_of_team
+            if not is_user_member_of_team(user.id, chosen_team):
+                raise HTTPException(status_code=403, detail="not_team_member")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=403, detail="not_team_member")
 
     # read file content
     content = await file.read()
     filename = (file.filename or f"upload-{uuid.uuid4().hex}").lower()
 
-    # SAVE to MINIO
-    ensure_bucket()
-    object_name = f"{INPUT_PREFIX}/{user.id}-{uuid.uuid4().hex[:12]}-{filename}"
+    # Save to MinIO (preferred)
     try:
-        input_path = put_bytes(object_name, content, content_type=file.content_type or "application/octet-stream")
+        ensure_bucket()
+        object_name = f"inputs/{user.id}-{uuid.uuid4().hex[:12]}-{filename}"
+        minio_client.put_object(
+            MINIO_BUCKET,
+            object_name,
+            io.BytesIO(content),
+            length=len(content),
+            content_type=file.content_type or "application/octet-stream"
+        )
+        input_path = f"s3://{MINIO_BUCKET}/{object_name}"
     except Exception as e:
-        logger.exception("minio save failed: %s", e)
-        raise HTTPException(status_code=500, detail="save_input_failed")
+        logger.exception("minio save failed, fallback to disk: %s", e)
+        # fallback to disk
+        fname = f"{user.id}-{uuid.uuid4().hex[:12]}-{filename}"
+        input_path = os.path.join(INPUT_FOLDER, fname)
+        try:
+            with open(input_path, "wb") as fh:
+                fh.write(content)
+        except Exception:
+            logger.exception("disk save also failed")
+            raise HTTPException(status_code=500, detail="save_input_failed")
 
     # QUICK COUNT / PARSE of emails
     emails = []
@@ -122,13 +155,14 @@ async def submit_bulk(
     per_cost = _dec(get_cost_for_key("verify.bulk_per_email") or 0)
     estimated_cost = (per_cost * Decimal(total)).quantize(Decimal("0.000001"))
 
-    # Reserve credits up-front
+    # Reserve credits up-front (team-first if chosen_team provided)
     try:
         reserve_tx = reserve_and_deduct(
             user.id,
             estimated_cost,
             reference=f"bulk-reserve:{uuid.uuid4().hex[:8]}",
             team_id=chosen_team,
+            job_id=None,  # will attach job_id after create
         )
     except HTTPException as e:
         raise e
@@ -136,7 +170,7 @@ async def submit_bulk(
         logger.exception("reserve failed: %s", e)
         raise HTTPException(status_code=500, detail="reserve_failed")
 
-    # create DB job with team_id recorded if model supports it
+    # create DB job with team_id recorded
     db = SessionLocal()
     job_id = f"bulk-{uuid.uuid4().hex[:12]}"
     try:
@@ -146,8 +180,10 @@ async def submit_bulk(
             status = "queued",
             input_path = input_path,
             total = total,
-            webhook_url = webhook_url
+            webhook_url = webhook_url,
+            estimated_cost = float(estimated_cost)
         )
+        # attach team_id if BulkJob model has attribute
         try:
             setattr(job, "team_id", chosen_team)
         except Exception:
@@ -156,11 +192,23 @@ async def submit_bulk(
         db.add(job)
         db.commit()
         db.refresh(job)
+
+        # Link reservation(s) to job_id if reservation system used job_id field
+        try:
+            from backend.app.models.credit_reservation import CreditReservation
+            res_rows = db.query(CreditReservation).filter(CreditReservation.user_id==user.id, CreditReservation.locked==True, CreditReservation.job_id==None).all()
+            for r in res_rows:
+                r.job_id = job_id
+                db.add(r)
+            db.commit()
+        except Exception:
+            # not critical
+            pass
+
     except Exception as e:
         logger.exception("failed to create job row: %s", e)
         # attempt to refund reservation (best-effort)
         try:
-            from backend.app.services.credits_service import add_credits
             add_credits(user.id, estimated_cost, reference=f"{job_id}:refund_on_create_fail")
         except Exception:
             logger.exception("refund after job create fail also failed")
@@ -168,11 +216,12 @@ async def submit_bulk(
     finally:
         db.close()
 
-    # enqueue Celery task with estimated_cost
+    # enqueue Celery task with estimated_cost (worker will finalize and handle refunds)
     try:
         process_bulk_task.delay(job_id, float(estimated_cost))
-    except Exception:
-        logger.exception("enqueue failed, job created")
+    except Exception as e:
+        logger.exception("enqueue failed, job created: %s", e)
+        # keep job queued — worker may be restarted. We still return success to client.
 
     return {
         "job_id": job_id,
@@ -201,6 +250,7 @@ def job_status(job_id: str, admin = Depends(get_current_admin)):
             "output_path": job.output_path,
             "error_message": job.error_message,
             "team_id": getattr(job, "team_id", None),
+            "estimated_cost": float(getattr(job, "estimated_cost", 0) or 0),
         }
     finally:
         db.close()
@@ -218,6 +268,7 @@ def download_results(job_id: str, admin = Depends(get_current_admin)):
         db.close()
 
 
+# ---- user endpoints ----
 @router.get("/my-jobs")
 def list_my_jobs(page: int = 1, per_page: int = 20, current_user = Depends(get_current_user)):
     db = SessionLocal()
@@ -246,3 +297,4 @@ def list_my_jobs(page: int = 1, per_page: int = 20, current_user = Depends(get_c
         }
     finally:
         db.close()
+
