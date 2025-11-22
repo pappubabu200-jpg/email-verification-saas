@@ -148,3 +148,67 @@ def require_role(team_id: int, user_id: int, allowed_roles: List[str]) -> bool:
     if not role:
         return False
     return role in allowed_roles
+
+# backend/app/services/team_service.py
+from backend.app.db import SessionLocal
+from backend.app.models.team import Team
+from backend.app.models.team_member import TeamMember
+from backend.app.models.user import User
+from fastapi import HTTPException
+
+def is_user_member_of_team(user_id: int, team_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        tm = db.query(TeamMember).filter(TeamMember.team_id==team_id, TeamMember.user_id==user_id, TeamMember.is_active==True).first()
+        return bool(tm)
+    finally:
+        db.close()
+
+def create_team(owner_id: int, name: str, slug: str = None, metadata: str = None) -> Team:
+    db = SessionLocal()
+    try:
+        team = Team(name=name, slug=slug, owner_id=owner_id, metadata=metadata or "", credits=0)
+        db.add(team)
+        db.commit()
+        db.refresh(team)
+        # add owner as member with role owner
+        member = TeamMember(team_id=team.id, user_id=owner_id, role="owner", is_active=True)
+        db.add(member)
+        db.commit()
+        return team
+    finally:
+        db.close()
+
+def add_member(team_id: int, user_id: int, role: str = "member") -> TeamMember:
+    db = SessionLocal()
+    try:
+        existing = db.query(TeamMember).filter(TeamMember.team_id==team_id, TeamMember.user_id==user_id).first()
+        if existing:
+            existing.is_active = True
+            existing.role = role
+            db.add(existing)
+            db.commit()
+            db.refresh(existing)
+            return existing
+        tm = TeamMember(team_id=team_id, user_id=user_id, role=role, is_active=True)
+        db.add(tm)
+        db.commit()
+        db.refresh(tm)
+        return tm
+    finally:
+        db.close()
+
+def remove_member(team_id: int, user_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        tm = db.query(TeamMember).filter(TeamMember.team_id==team_id, TeamMember.user_id==user_id).first()
+        if not tm:
+            return False
+        tm.is_active = False
+        db.add(tm); db.commit()
+        return True
+    finally:
+        db.close()
+
+
+
