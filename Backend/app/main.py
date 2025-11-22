@@ -100,4 +100,8 @@ from backend.app.middleware.team_context import TeamContextMiddleware
 app.add_middleware(TeamContextMiddleware)
 
 
+from backend.app.middleware.team_acl import TeamACL
+app.add_middleware(TeamACL)
+
+
 
