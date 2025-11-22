@@ -274,3 +274,36 @@ def list_my_jobs(page: int = 1, per_page: int = 20, current_user = Depends(get_c
         }
     finally:
         db.close()
+
+
+
+@router.post("/submit")
+async def submit_bulk(file: UploadFile = File(...), webhook_url: str = None, request: Request = None, current_user = Depends(get_current_user)):
+    user = current_user
+    if not user:
+        raise HTTPException(status_code=401, detail="auth_required")
+
+    # ---------------------------
+    # MINIO SAVE STARTS HERE 🔥
+    # ---------------------------
+    from backend.app.services.minio_client import client, MINIO_BUCKET
+
+    content = await file.read()
+    filename = (file.filename or f"upload-{uuid.uuid4().hex}").lower()
+
+    object_name = f"inputs/{user.id}-{uuid.uuid4().hex[:12]}-{filename}"
+
+    client.put_object(
+        MINIO_BUCKET,
+        object_name,
+        io.BytesIO(content),
+        length=len(content),
+        content_type=file.content_type or "application/octet-stream"
+    )
+
+    input_path = f"s3://{MINIO_BUCKET}/{object_name}"
+    # ---------------------------
+    # MINIO SAVE ENDS HERE 🔥
+    # ---------------------------
+
+    # continue with counting emails, pricing, reservation, etc…
