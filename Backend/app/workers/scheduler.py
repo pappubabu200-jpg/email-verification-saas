@@ -22,3 +22,35 @@ def reset_daily():
     logger.info("Running daily API key usage reset")
     reset_all_api_keys_usage()
     logger.info("Completed daily API key usage reset")
+
+
+# backend/app/workers/scheduler.py
+from backend.app.celery_app import celery_app
+from backend.app.services.credits_service import release_reservation_by_job
+from backend.app.services.reservation_finalizer import finalize_reservations_for_job
+from backend.app.db import SessionLocal
+from backend.app.models.credit_reservation import CreditReservation
+from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
+
+@celery_app.on_after_configure.connect
+def setup_periodic_tasks(sender, **kwargs):
+    # run cleanup every 10 minutes
+    sender.add_periodic_task(600.0, cleanup_expired_reservations.s(), name="cleanup_expired_reservations")
+
+@celery_app.task(name="cleanup_expired_reservations")
+def cleanup_expired_reservations():
+    db = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        expired = db.query(CreditReservation).filter(CreditReservation.expires_at < now, CreditReservation.locked == True).all()
+        for r in expired:
+            logger.info("releasing expired reservation %s", r.id)
+            r.locked = False
+            db.add(r)
+        db.commit()
+    finally:
+        db.close()
+
