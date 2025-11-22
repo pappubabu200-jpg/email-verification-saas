@@ -41,3 +41,11 @@ S3_BUCKET: str = ""
 S3_ACCESS_KEY: str = ""
 S3_SECRET_KEY: str = ""
 S3_REGION: str = ""
+
+MINIO_ENDPOINT=localhost:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_SECURE=false
+MINIO_BUCKET=email-saas-objects
+BULK_INPUT_PREFIX=inputs
+BULK_OUTPUT_PREFIX=outputs
