@@ -47,49 +47,57 @@ def add_credits(user_id: int, amount: Decimal, reference: str=None) -> dict:
     finally:
         db.close()
 
-def reserve_and_deduct(user_id: int, amount: Decimal, reference: str=None, team_id: int=None) -> dict:
+def reserve_and_deduct(user_id: int, amount: Decimal, reference: str = None, team_id: int = None, job_id: str = None) -> dict:
     """
-    Attempt to deduct credits. If team_id provided, try team pool first (team owners decided).
-    Behavior:
-      - If team_id provided and team has sufficient balance -> deduct from team (use team tx).
-      - Else if user has sufficient personal credits -> deduct from user.
-      - Else raise 402 insufficient_credits.
+    Reserve credits for a user or team.
+    - If team_id provided -> deduct from team pool first.
+    - Otherwise deduct from user balance.
+    - Creates a CreditReservation row with job_id attached.
     """
-    # 1) Try team pool if team_id given
+
+    # 1) If TEAM billing enabled → try team first
     if team_id:
+        from backend.app.services.team_billing_service import reserve_and_deduct_team
         try:
-            return reserve_and_deduct_team(team_id, amount, reference=reference)
+            return reserve_and_deduct_team(team_id, amount, reference=reference, job_id=job_id)
         except HTTPException as e:
-            # team insufficient -> fallthrough to user or abort depending policy
             if e.status_code != 402:
                 raise
-            # else try user balance below
+            # team insufficient → fallthrough to user personal credits
 
-            pass
-
-    # 2) Deduct from user
+    # 2) Deduct from USER
     db = SessionLocal()
     try:
         user = db.query(User).get(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="user_not_found")
+
         balance = Decimal(getattr(user, "credits", 0) or 0)
+
         if balance < amount:
             raise HTTPException(status_code=402, detail="insufficient_credits")
-        new_balance = balance - amount
-        if hasattr(user, "credits"):
-            user.credits = float(new_balance)
-            db.add(user)
-        tr = CreditTransaction(user_id=user_id, amount=-amount, balance_after=new_balance, type="debit", reference=reference or "")
-        db.add(tr)
+
+        # Lock reservation
+        expires_at = datetime.utcnow() + timedelta(hours=1)
+
+        reservation = CreditReservation(
+            user_id=user_id,
+            amount=amount,
+            job_id=job_id,       # 🔥 KEY: link reservation to job
+            locked=True,
+            expires_at=expires_at,
+            reference=reference
+        )
+
+        db.add(reservation)
         db.commit()
-        db.refresh(tr)
-        return {"balance_after": float(new_balance), "transaction_id": tr.id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("reserve_and_deduct failed: %s", e)
-        raise HTTPException(status_code=500, detail="credit_error")
+        db.refresh(reservation)
+
+        return {
+            "reservation_id": reservation.id,
+            "reserved_amount": float(amount),
+            "job_id": job_id,
+        }
     finally:
         db.close()
 
