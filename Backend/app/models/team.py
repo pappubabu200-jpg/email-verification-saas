@@ -36,3 +36,21 @@ class Team(Base, IdMixin, TimestampMixin):
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     credits = Column(Numeric(18,6), nullable=False, default=0)
     is_active = Column(Boolean, default=True)
+
+# backend/app/models/team.py
+from sqlalchemy import Column, Integer, String, Numeric, ForeignKey, Boolean
+from sqlalchemy.orm import relationship
+from backend.app.db import Base
+from backend.app.models.base import IdMixin, TimestampMixin
+
+class Team(Base, IdMixin, TimestampMixin):
+    __tablename__ = "teams"
+
+    name = Column(String(200), nullable=False, unique=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    credits = Column(Numeric(18,6), nullable=False, default=0)
+    is_active = Column(Boolean, default=True)
+
+    # relationships (optional; can be used by ORM when loading)
+    members = relationship("TeamMember", back_populates="team", cascade="all, delete-orphan")
+    owner = relationship("User", primaryjoin="Team.owner_id==User.id", viewonly=True)
