@@ -174,3 +174,44 @@ def release_reservation_by_job(job_id: str):
         return True
     finally:
         db.close()
+
+
+
+from backend.app.models.credit_reservation import CreditReservation
+from backend.app.models.credit_transaction import CreditTransaction
+
+def capture_reservation_and_charge(reservation_id: int, type_: str = "charge", reference: str = None):
+    db = SessionLocal()
+    try:
+        res = db.query(CreditReservation).get(reservation_id)
+        if not res or not res.locked:
+            raise HTTPException(status_code=404, detail="reservation_not_found_or_unlocked")
+        # team reservation handled by team_billing_service
+        if res.team_id:
+            from backend.app.services.team_billing_service import capture_team_reservation
+            return capture_team_reservation(res.id, type_=type_, reference=reference)
+        # user reservation → create transaction and reduce user credits
+        user = db.query(User).get(res.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="user_not_found")
+        amt = Decimal(res.amount)
+        # ensure user has credits column
+        if hasattr(user, "credits"):
+            user.credits = float(Decimal(user.credits or 0) - amt)
+        tx = CreditTransaction(user_id=res.user_id, amount=-float(amt), balance_after=float(get_user_balance(res.user_id)), type=type_, reference=reference or res.reference)
+        res.locked = False
+        db.add(tx); db.add(res); db.add(user); db.commit(); db.refresh(tx)
+        return {"transaction_id": tx.id}
+    finally:
+        db.close()
+
+def release_reservation_by_job(job_id: str):
+    db = SessionLocal()
+    try:
+        rows = db.query(CreditReservation).filter(CreditReservation.job_id == job_id, CreditReservation.locked == True).all()
+        for r in rows:
+            r.locked = False
+        db.commit()
+        return True
+    finally:
+        db.close()
