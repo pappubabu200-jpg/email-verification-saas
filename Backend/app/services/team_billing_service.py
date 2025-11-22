@@ -272,4 +272,87 @@ def add_team_credits(team_id: int, amount: Decimal, reference: str = None):
     finally:
         db.close()
 
+from decimal import Decimal
+from datetime import datetime, timedelta
+from backend.app.db import SessionLocal
+from backend.app.models.team import Team
+from backend.app.models.credit_reservation import CreditReservation
+from backend.app.models.credit_transaction import CreditTransaction
+from fastapi import HTTPException
+import logging
 
+logger = logging.getLogger(__name__)
+RESERVATION_TTL_SECONDS = 60 * 60  # 1 hour
+
+def get_team_balance(team_id: int) -> Decimal:
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        return Decimal(t.credits or 0)
+    finally:
+        db.close()
+
+def add_team_credits(team_id: int, amount: Decimal, reference: str = None) -> dict:
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        new_balance = Decimal(t.credits or 0) + Decimal(amount)
+        t.credits = new_balance
+        tx = CreditTransaction(user_id=None, amount=float(amount), balance_after=float(new_balance), type="team_topup", reference=reference or f"team_topup:{team_id}")
+        # For team transactions we store user_id=None; admin can trace by reference
+        db.add(tx); db.add(t); db.commit(); db.refresh(tx)
+        return {"balance_after": float(new_balance), "transaction_id": tx.id}
+    finally:
+        db.close()
+
+def reserve_and_deduct_team(team_id: int, amount: Decimal, reference: str = None, job_id: str = None) -> dict:
+    """
+    Reserve from team pool (create CreditReservation.team_id)
+    """
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        balance = Decimal(t.credits or 0)
+        # compute locked reservations for team
+        locked_rows = db.query(CreditReservation).filter(CreditReservation.team_id == team_id, CreditReservation.locked == True).all()
+        locked_sum = Decimal("0")
+        for r in locked_rows:
+            locked_sum += Decimal(r.amount)
+        available = balance - locked_sum
+        if Decimal(amount) > available:
+            raise HTTPException(status_code=402, detail="team_insufficient_credits")
+        expires_at = datetime.utcnow() + timedelta(seconds=RESERVATION_TTL_SECONDS)
+        res = CreditReservation(team_id=team_id, user_id=None, amount=amount, job_id=job_id, locked=True, expires_at=expires_at, reference=reference)
+        db.add(res); db.commit(); db.refresh(res)
+        return {"reservation_id": res.id, "reserved_amount": float(amount), "team_id": team_id, "job_id": job_id}
+    finally:
+        db.close()
+
+def capture_team_reservation(reservation_id: int, type_: str = "team_charge", reference: str = None) -> dict:
+    """
+    Capture reservation and deduct from team. Creates a CreditTransaction for admin trace.
+    """
+    db = SessionLocal()
+    try:
+        res = db.query(CreditReservation).get(reservation_id)
+        if not res or not res.locked:
+            raise HTTPException(status_code=404, detail="reservation_missing_or_unlocked")
+        if not res.team_id:
+            raise HTTPException(status_code=400, detail="not_team_reservation")
+        team = db.query(Team).get(res.team_id)
+        if not team:
+            raise HTTPException(status_code=404, detail="team_missing")
+        amt = Decimal(res.amount)
+        team.credits = Decimal(team.credits or 0) - amt
+        res.locked = False
+        tx = CreditTransaction(user_id=None, amount=-float(amt), balance_after=float(team.credits), type=type_, reference=reference or res.reference)
+        db.add(tx); db.add(team); db.add(res); db.commit(); db.refresh(tx)
+        return {"transaction_id": tx.id, "balance_after": float(team.credits)}
+    finally:
+        db.close()
