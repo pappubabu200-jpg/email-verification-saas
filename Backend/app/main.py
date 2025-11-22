@@ -108,5 +108,9 @@ app.include_router(team.router)
 
 
 
+from backend.app.api.v1 import team_billing
+app.include_router(team_billing.router)
+
+
 
 
