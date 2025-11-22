@@ -298,3 +298,28 @@ def list_my_jobs(page: int = 1, per_page: int = 20, current_user = Depends(get_c
     finally:
         db.close()
 
+
+
+@router.get("/download-url/{job_id}")
+def get_signed_download_url(job_id: str, current_user = Depends(get_current_user)):
+    db = SessionLocal()
+    try:
+        job = db.query(BulkJob).filter(BulkJob.job_id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="job_not_found")
+
+        if not job.output_path or not job.output_path.startswith("s3://"):
+            raise HTTPException(status_code=400, detail="no_output_available")
+
+        # Extract object path
+        object_key = job.output_path.replace("s3://", "").split("/", 1)[1]
+
+        from backend.app.services.minio_signed_url import generate_signed_url
+        url = generate_signed_url(object_key, expiry_seconds=1800)
+
+        return {"download_url": url}
+
+    finally:
+        db.close()
+        
+
