@@ -1,1 +1,20 @@
+# Local dev .env.dev
+DATABASE_URL=postgresql://svcuser:svcpass@localhost:5432/emailsaas_dev
+REDIS_URL=redis://localhost:6379/0
+JWT_SECRET_KEY=replace-me-dev
+JWT_ALGORITHM=HS256
 
+MINIO_ENABLED=false
+MINIO_ENDPOINT=localhost:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET=email-saas
+
+STRIPE_SECRET_KEY=sk_test_replace
+STRIPE_WEBHOOK_SECRET=whsec_replace
+
+CELERY_BROKER_URL=redis://localhost:6379/1
+CELERY_BACKEND_URL=redis://localhost:6379/2
+
+BULK_INPUT_FOLDER=/tmp/bulk_inputs
+MINIO_LOCAL_PATH=/tmp/minio_fallback
