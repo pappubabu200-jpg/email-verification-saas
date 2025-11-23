@@ -322,4 +322,171 @@ def get_signed_download_url(job_id: str, current_user = Depends(get_current_user
     finally:
         db.close()
         
+# backend/app/api/v1/bulk.py
 
+import os, io, uuid, csv, zipfile, logging
+from fastapi import APIRouter, Request, Depends, UploadFile, File, HTTPException
+from decimal import Decimal, ROUND_HALF_UP
+
+from backend.app.db import SessionLocal
+from backend.app.models.bulk_job import BulkJob
+from backend.app.services.pricing_service import get_cost_for_key
+from backend.app.services.credits_service import reserve_and_deduct
+from backend.app.services.team_service import is_user_member_of_team
+from backend.app.workers.bulk_tasks import process_bulk_task
+from backend.app.services.minio_client import client, MINIO_BUCKET
+from backend.app.utils.security import get_current_user
+from backend.app.config import settings
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/v1/bulk", tags=["bulk"])
+
+def _dec(x):
+    return Decimal(str(x)).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+
+
+# -------------------------
+# SUBMIT BULK JOB
+# -------------------------
+@router.post("/submit")
+async def submit_bulk(
+    file: UploadFile = File(...),
+    webhook_url: str = None,
+    request: Request = None,
+    team_id: int = None,
+    current_user = Depends(get_current_user),
+):
+    """
+    Team billing priority:
+      1) If team_id provided → deduct from team pool (if admin or member)
+      2) If insufficient → fall back to user credits
+    """
+    user = current_user
+    if not user:
+        raise HTTPException(status_code=401, detail="auth_required")
+
+    # Determine chosen team (query & middleware combined)
+    chosen_team = team_id or getattr(request.state, "team_id", None)
+
+    # If team chosen, validate membership
+    if chosen_team:
+        if not is_user_member_of_team(user.id, chosen_team):
+            raise HTTPException(status_code=403, detail="not_team_member")
+
+    # Read file from user
+    content = await file.read()
+    filename = (file.filename or f"upload-{uuid.uuid4().hex}").lower()
+
+    # ---------------------
+    # SAVE TO MINIO
+    # ---------------------
+    object_name = f"inputs/{user.id}-{uuid.uuid4().hex[:10]}-{filename}"
+
+    client.put_object(
+        MINIO_BUCKET,
+        object_name,
+        io.BytesIO(content),
+        length=len(content),
+        content_type=file.content_type or "application/octet-stream",
+    )
+
+    input_path = f"s3://{MINIO_BUCKET}/{object_name}"
+
+    # ---------------------
+    # PARSE EMAILS
+    # ---------------------
+    emails = []
+
+    try:
+        if filename.endswith(".zip"):
+            z = zipfile.ZipFile(io.BytesIO(content))
+            for name in z.namelist():
+                if name.lower().endswith(".csv"):
+                    raw = z.read(name).decode("utf-8", errors="ignore")
+                    for row in csv.reader(io.StringIO(raw)):
+                        for col in row:
+                            if "@" in col:
+                                emails.append(col.strip())
+                                break
+                elif name.lower().endswith(".txt"):
+                    for line in z.read(name).decode("utf-8", errors="ignore").splitlines():
+                        if "@" in line:
+                            emails.append(line.strip())
+
+        elif filename.endswith(".csv"):
+            raw = content.decode("utf-8", errors="ignore")
+            for row in csv.reader(io.StringIO(raw)):
+                for col in row:
+                    if "@" in col:
+                        emails.append(col.strip())
+                        break
+        else:
+            # Fallback TXT
+            raw = content.decode("utf-8", errors="ignore")
+            for line in raw.splitlines():
+                if "@" in line:
+                    emails.append(line.strip())
+
+    except Exception as e:
+        logger.exception("parse_failed: %s", e)
+        raise HTTPException(status_code=400, detail="parse_failed")
+
+    # Clean & dedupe
+    emails = [e.lower().strip() for e in emails if "@" in e]
+    emails = list(dict.fromkeys(emails))
+
+    total = len(emails)
+    if total == 0:
+        raise HTTPException(status_code=400, detail="no_valid_emails")
+
+    # ---------------------
+    # PRICING & RESERVATION
+    # ---------------------
+    per_cost = _dec(get_cost_for_key("verify.bulk_per_email"))
+    estimated_cost = (per_cost * Decimal(total)).quantize(Decimal("0.000001"))
+
+    job_id = f"bulk-{uuid.uuid4().hex[:12]}"
+
+    # Reserve credits (team first if provided)
+    reserve_tx = reserve_and_deduct(
+        user.id,
+        estimated_cost,
+        reference=f"{job_id}:reserve",
+        team_id=chosen_team,
+        job_id=job_id,
+    )
+
+    # ---------------------
+    # CREATE JOB IN DB
+    # ---------------------
+    db = SessionLocal()
+    try:
+        job = BulkJob(
+            user_id=user.id,
+            job_id=job_id,
+            status="queued",
+            total=total,
+            input_path=input_path,
+            webhook_url=webhook_url,
+            team_id=chosen_team,
+        )
+        db.add(job)
+        db.commit()
+    finally:
+        db.close()
+
+    # ---------------------
+    # ENQUEUE WORKER
+    # ---------------------
+    try:
+        process_bulk_task.delay(job_id, float(estimated_cost))
+    except Exception as e:
+        logger.exception("enqueue_failed: %s", e)
+
+    return {
+        "job_id": job_id,
+        "total": total,
+        "estimated_cost": float(estimated_cost),
+        "reserve_tx": reserve_tx,
+        "team_id": chosen_team,
+    }
