@@ -908,3 +908,85 @@ emails_found = len(res.get("emails") or [])
 if emails_found == 0:
     refund_amount = (estimated_cost * Decimal("0.5")).quantize(Decimal("0.000001"))
     add_credits(user.id, refund_amount, reference=f"{job_id}:refund_no_emails")
+from backend.app.services.credits_service import capture_reservation_and_charge
+
+# capture primary reservation
+try:
+    capture_reservation_and_charge(
+        reservation["reservation_id"],
+        type_="extractor.single",
+        reference=f"{job_id}:charge"
+    )
+except Exception as e:
+    logger.exception("extractor single capture failed: %s", e)
+
+
+                job_id = f"ext-bulk-{uuid.uuid4().hex[:12]}"
+reserve_ref = f"{job_id}:reserve"
+
+reservation = reserve_and_deduct(
+    user.id,
+    estimated_cost,
+    reference=reserve_ref,
+    job_id=job_id,
+    team_id=getattr(request.state, "team_id", None)
+)
+
+
+actual_cost = (per_url_cost * Decimal(total_urls)).quantize(Decimal("0.000001"))
+refund_amount = Decimal("0")
+
+# refund if >50% fails
+failed_count = total_urls - success_count
+if total_urls > 0 and failed_count / total_urls >= 0.5:
+    refund_amount = (actual_cost * Decimal("0.5")).quantize(Decimal("0.000001"))
+    add_credits(user.id, refund_amount, reference=f"{job_id}:refund_bulk_extractor")
+
+
+from backend.app.services.credits_service import (
+    capture_reservation_and_charge,
+    release_reservation,
+)
+from backend.app.models.credit_reservation import CreditReservation
+
+db = SessionLocal()
+try:
+    reservations = db.query(CreditReservation).filter(
+        CreditReservation.job_id == job_id,
+        CreditReservation.locked == True
+    ).all()
+
+    remaining = actual_cost
+
+    for r in reservations:
+        amt = Decimal(str(r.amount))
+
+        if remaining <= 0:
+            release_reservation(db, r.id)
+            continue
+
+        if amt <= remaining:
+            capture_reservation_and_charge(
+                db,
+                r.id,
+                type_="extractor.bulk.charge",
+                reference=f"{job_id}:charge"
+            )
+            remaining -= amt
+        else:
+            # capture partial and refund remainder
+            capture_reservation_and_charge(
+                db,
+                r.id,
+                type_="extractor.bulk.charge",
+                reference=f"{job_id}:charge"
+            )
+            extra = amt - remaining
+            add_credits(user.id, extra, reference=f"{job_id}:refund_extra")
+            remaining = Decimal("0")
+
+finally:
+    db.close()
+
+
+
