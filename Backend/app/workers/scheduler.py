@@ -81,4 +81,9 @@ def recover_dead_jobs():
     finally:
         db.close()
         
-
+celery_app.conf.beat_schedule.update({
+    "recover-dead-jobs-every-10min": {
+        "task": "backend.app.workers.scheduler.recover_dead_jobs",
+        "schedule": 600,   # 10 minutes
+    }
+})
