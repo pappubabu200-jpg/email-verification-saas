@@ -126,3 +126,16 @@ try:
     # add other event types if you wish
 except Exception:
     logger.exception("Failed to handle stripe event: %s", evt_type)
+# At top:
+from backend.app.services.subscription_service import (
+    upsert_subscription_from_stripe,
+    delete_subscription_from_stripe
+)
+
+# Inside event handler:
+elif evt_type == "customer.subscription.created":
+    upsert_subscription_from_stripe(obj)
+elif evt_type == "customer.subscription.updated":
+    upsert_subscription_from_stripe(obj)
+elif evt_type == "customer.subscription.deleted":
+    delete_subscription_from_stripe(obj)
