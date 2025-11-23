@@ -490,3 +490,10 @@ async def submit_bulk(
         "reserve_tx": reserve_tx,
         "team_id": chosen_team,
     }
+reserve_tx = reserve_and_deduct(
+    user.id,
+    estimated_cost,
+    reference=f"bulk-reserve:{uuid.uuid4().hex[:8]}",
+    team_id=chosen_team,
+    job_id=job_id
+        )
