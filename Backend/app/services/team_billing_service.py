@@ -413,4 +413,98 @@ def remove_team_member(team_id: int, user_id: int) -> bool:
         db.close()
 
 
+# backend/app/services/team_billing_service.py
+from decimal import Decimal
+from backend.app.db import SessionLocal
+from backend.app.models.team import Team
+from backend.app.models.team_member import TeamMember
+from backend.app.models.credit_transaction import CreditTransaction
+from backend.app.models.user import User
+from backend.app.models.credit_reservation import CreditReservation
+from fastapi import HTTPException
+from datetime import datetime, timedelta
+
+RESERVATION_TTL_SECONDS = 60 * 60
+
+def is_user_member_of_team(db, user_id: int, team_id: int) -> bool:
+    m = db.query(TeamMember).filter(TeamMember.user_id == user_id, TeamMember.team_id == team_id, TeamMember.active == True).first()
+    return bool(m)
+
+def get_team_balance(team_id: int) -> Decimal:
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        return Decimal(t.credits or 0)
+    finally:
+        db.close()
+
+def add_team_credits(team_id: int, amount: Decimal, reference: str = None):
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        t.credits = int((t.credits or 0) + int(amount))
+        # Record as credit transaction (user_id set to team owner for traceability)
+        tx = CreditTransaction(user_id=t.owner_id, amount=float(amount), balance_after=float(t.credits), type="team_credit", reference=reference or "")
+        db.add(tx)
+        db.add(t)
+        db.commit()
+        db.refresh(tx)
+        return {"balance_after": t.credits, "tx_id": tx.id}
+    finally:
+        db.close()
+
+def reserve_and_deduct_team(team_id: int, amount: Decimal, reference: str = None, job_id: str = None):
+    """
+    Reserve credits from team pool (create CreditReservation with user_id = owner_id).
+    """
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        if (t.credits or 0) < int(amount):
+            raise HTTPException(status_code=402, detail="insufficient_team_credits")
+        # create reservation record with user_id as team.owner_id and reference marking team
+        expires_at = datetime.utcnow() + timedelta(seconds=RESERVATION_TTL_SECONDS)
+        res = CreditReservation(user_id=t.owner_id, amount=int(amount), job_id=job_id, locked=True, expires_at=expires_at, reference=f"team:{team_id}:{reference or ''}")
+        db.add(res)
+        # deduct team credits immediately (we keep team.credits adjusted upon capture to avoid double spending)
+        t.credits = int((t.credits or 0) - int(amount))
+        db.add(t)
+        db.commit()
+        db.refresh(res)
+        return {"reservation_id": res.id, "reserved_amount": int(amount), "team_balance_after": t.credits}
+    finally:
+        db.close()
+
+def capture_reservation_and_charge_team(reservation_id: int, type_: str = "team_charge", reference: str = None):
+    db = SessionLocal()
+    try:
+        from backend.app.models.credit_reservation import CreditReservation
+        res = db.query(CreditReservation).get(reservation_id)
+        if not res:
+            raise HTTPException(status_code=404, detail="reservation_not_found")
+        if not res.locked:
+            raise HTTPException(status_code=400, detail="reservation_not_locked")
+        # create transaction for owner and mark unlocked
+        owner_id = res.user_id
+        balance = db.query(CreditTransaction).filter(CreditTransaction.user_id==owner_id).order_by(CreditTransaction.created_at.desc()).limit(1).all()
+        current = Decimal(balance[0].balance_after) if balance else Decimal("0")
+        new_balance = current - Decimal(res.amount)
+        tx = CreditTransaction(user_id=owner_id, amount=-res.amount, balance_after=new_balance, type=type_, reference=reference or "")
+        res.locked = False
+        db.add(tx)
+        db.add(res)
+        db.commit()
+        db.refresh(tx)
+        return {"tx_id": tx.id, "balance_after": float(new_balance)}
+    finally:
+        db.close()
+
+
+
 
