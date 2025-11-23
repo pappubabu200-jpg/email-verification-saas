@@ -54,3 +54,13 @@ class TeamMember(Base, IdMixin):
     joined_at = Column(DateTime(timezone=True), server_default=func.now())
 
     team = relationship("Team", back_populates="members", viewonly=True)
+from sqlalchemy import Column, Integer, String, ForeignKey
+from backend.app.db import Base
+from backend.app.models.base import IdMixin, TimestampMixin
+
+class TeamMember(Base, IdMixin, TimestampMixin):
+    __tablename__ = "team_members"
+
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    role = Column(String(50), default="member")
