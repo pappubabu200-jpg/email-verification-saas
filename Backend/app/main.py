@@ -180,3 +180,6 @@ from backend.app.services.plan_service import seed_default_plans
 def on_start():
     seed_default_plans()
 
+
+from backend.app.api.v1 import admin_extractor
+app.include_router(admin_extractor.router)
