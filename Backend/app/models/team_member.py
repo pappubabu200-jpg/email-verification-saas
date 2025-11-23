@@ -64,3 +64,20 @@ class TeamMember(Base, IdMixin, TimestampMixin):
     team_id = Column(Integer, ForeignKey("teams.id"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     role = Column(String(50), default="member")
+
+
+# backend/app/models/team_member.py
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey
+from backend.app.db import Base
+from app.models.base import IdMixin, TimestampMixin  # adjust import if needed
+
+class TeamMember(Base, IdMixin, TimestampMixin):
+    __tablename__ = "team_members"
+
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    role = Column(String(50), default="member")  # owner/admin/member
+    can_billing = Column(Boolean, default=False)
+    active = Column(Boolean, default=True)
+
+
