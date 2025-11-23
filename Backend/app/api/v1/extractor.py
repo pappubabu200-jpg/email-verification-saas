@@ -644,4 +644,239 @@ def single_extract(payload: SingleExtractIn, request: Request, current_user = De
         "refund_amount": float(refund_amount),
         "reserve_tx": reserve_res
     }
-    
+
+
+# backend/app/api/v1/extractor.py
+import io
+import uuid
+import csv
+import zipfile
+import logging
+from decimal import Decimal, ROUND_HALF_UP
+from typing import List, Dict, Any, Optional
+
+from fastapi import APIRouter, Request, Depends, UploadFile, File, HTTPException
+from pydantic import BaseModel
+
+from backend.app.utils.security import get_current_user
+from backend.app.services.pricing_service import get_cost_for_key
+from backend.app.services.credits_service import reserve_and_deduct, add_credits, get_user_balance
+from backend.app.services.plan_service import get_plan_by_name
+from backend.app.services.team_service import is_user_member_of_team
+from backend.app.services.minio_client import client as minio_client, MINIO_BUCKET
+from backend.app.config import settings
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/v1/extractor", tags=["extractor"])
+
+# Attempt to import extractor engine (if available)
+try:
+    from backend.app.services.extractor_engine import extract_url
+except Exception:
+    extract_url = None
+
+def _dec(x) -> Decimal:
+    return Decimal(str(x)).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+
+class SingleExtractIn(BaseModel):
+    url: str
+    parse_links: Optional[bool] = False
+
+def _parse_urls_from_text(text: str) -> List[str]:
+    out = []
+    for line in text.splitlines():
+        s = line.strip()
+        if s:
+            out.append(s)
+    return out
+
+def _extract_single(url: str, parse_links: bool = False) -> Dict[str, Any]:
+    try:
+        if extract_url:
+            return extract_url(url, parse_links=parse_links)
+        # fallback stub
+        return {"url": url, "emails": [], "links_found": []}
+    except Exception:
+        logger.exception("extract_url failed for %s", url)
+        return {"url": url, "error": "extract_failed"}
+
+# -------------------------
+# SINGLE SYNCHRONOUS EXTRACT
+# -------------------------
+@router.post("/single", response_model=Dict[str, Any])
+def single_extract(payload: SingleExtractIn, request: Request, current_user = Depends(get_current_user)):
+    user = current_user
+    if not user:
+        raise HTTPException(status_code=401, detail="auth_required")
+
+    # team context (optional)
+    chosen_team = getattr(request.state, "team_id", None)
+
+    # pricing
+    per_cost = _dec(get_cost_for_key("extractor.single_page") or 0)
+    estimated_cost = per_cost
+    job_id = f"ext-{uuid.uuid4().hex[:12]}"
+
+    # reserve (team first)
+    try:
+        reserve_tx = reserve_and_deduct(user.id, estimated_cost, reference=f"{job_id}:reserve", team_id=chosen_team, job_id=job_id) if estimated_cost > 0 else {"balance_after": float(get_user_balance(user.id))}
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+    # perform extraction
+    try:
+        res = _extract_single(payload.url, parse_links=payload.parse_links)
+    except Exception as e:
+        logger.exception("extraction failed: %s", e)
+        try:
+            add_credits(user.id, estimated_cost, reference=f"{job_id}:refund_error")
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="extraction_failed")
+
+    # refund policy: if no emails found, partial refund 50%
+    refund_amount = Decimal("0")
+    try:
+        emails_found = 0
+        if isinstance(res, dict) and res.get("emails"):
+            emails_found = len(res.get("emails") or [])
+        if emails_found == 0 and estimated_cost > 0:
+            refund_amount = (estimated_cost * Decimal("0.5")).quantize(Decimal("0.000001"))
+            try:
+                add_credits(user.id, refund_amount, reference=f"{job_id}:partial_refund_no_emails")
+            except Exception:
+                logger.exception("refund failed for %s", job_id)
+    except Exception:
+        logger.exception("post-charge refund logic failed for %s", job_id)
+
+    actual_cost = float(estimated_cost - refund_amount)
+
+    return {
+        "job_id": job_id,
+        "url": payload.url,
+        "result": res,
+        "estimated_cost": float(estimated_cost),
+        "refund_amount": float(refund_amount),
+        "actual_cost": actual_cost,
+        "reserve_tx": reserve_tx
+    }
+
+
+# -------------------------
+# BULK UPLOAD EXTRACTOR
+# -------------------------
+@router.post("/bulk-upload", response_model=Dict[str, Any])
+async def bulk_extract(file: UploadFile = File(...), request: Request = None, current_user = Depends(get_current_user)):
+    user = current_user
+    if not user:
+        raise HTTPException(status_code=401, detail="auth_required")
+
+    chosen_team = getattr(request.state, "team_id", None)
+
+    content = await file.read()
+    filename = (file.filename or f"upload-{uuid.uuid4().hex}").lower()
+
+    # Save to MinIO
+    object_name = f"extract_inputs/{user.id}-{uuid.uuid4().hex[:12]}-{filename}"
+    try:
+        minio_client.put_object(MINIO_BUCKET, object_name, io.BytesIO(content), length=len(content), content_type=file.content_type or "application/octet-stream")
+    except Exception as e:
+        logger.exception("minio put failed: %s", e)
+        raise HTTPException(status_code=500, detail="storage_failed")
+
+    input_path = f"s3://{MINIO_BUCKET}/{object_name}"
+
+    # Extract URLs from uploaded file
+    urls: List[str] = []
+    try:
+        if filename.endswith(".zip"):
+            z = zipfile.ZipFile(io.BytesIO(content))
+            for name in z.namelist():
+                if name.endswith("/") or name.startswith("__MACOSX"):
+                    continue
+                if name.lower().endswith(".csv"):
+                    raw = z.read(name).decode("utf-8", errors="ignore")
+                    for row in csv.reader(io.StringIO(raw)):
+                        for col in row:
+                            v = col.strip()
+                            if v:
+                                urls.append(v)
+                                break
+                else:
+                    raw = z.read(name).decode("utf-8", errors="ignore")
+                    urls.extend(_parse_urls_from_text(raw))
+        elif filename.endswith(".csv"):
+            raw = content.decode("utf-8", errors="ignore")
+            for row in csv.reader(io.StringIO(raw)):
+                for col in row:
+                    v = col.strip()
+                    if v:
+                        urls.append(v)
+                        break
+        else:
+            raw = content.decode("utf-8", errors="ignore")
+            urls = _parse_urls_from_text(raw)
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="invalid_zip")
+    except Exception as e:
+        logger.exception("bulk parse failed: %s", e)
+        raise HTTPException(status_code=400, detail="parse_failed")
+
+    # dedupe
+    urls = [u.strip() for u in urls if u and len(u.strip()) > 0]
+    unique_urls = list(dict.fromkeys(urls))
+    total_urls = len(unique_urls)
+    if total_urls == 0:
+        raise HTTPException(status_code=400, detail="no_urls_found")
+
+    # Plan limit (if present)
+    if hasattr(user, "plan") and user.plan:
+        plan = get_plan_by_name(user.plan)
+        if plan and plan.daily_search_limit and total_urls > plan.daily_search_limit:
+            raise HTTPException(status_code=429, detail=f"bulk_size_exceeds_plan_limit ({plan.daily_search_limit})")
+
+    # pricing & reservation
+    per_url_cost = _dec(get_cost_for_key("extractor.bulk_per_url") or 0)
+    estimated_cost = (per_url_cost * Decimal(total_urls)).quantize(Decimal("0.000001"))
+
+    job_id = f"ext-bulk-{uuid.uuid4().hex[:12]}"
+
+    try:
+        reserve_tx = reserve_and_deduct(user.id, estimated_cost, reference=f"{job_id}:reserve", team_id=chosen_team, job_id=job_id) if estimated_cost > 0 else {"balance_after": float(get_user_balance(user.id))}
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+    # For now we run extraction synchronously (small uploads). For large sets you should enqueue a worker.
+    results: List[Dict[str, Any]] = []
+    success_count = 0
+    for url in unique_urls:
+        try:
+            r = _extract_single(url, parse_links=False)
+            results.append({"url": url, "result": r})
+            if isinstance(r, dict) and (r.get("emails") or r.get("links_found")):
+                success_count += 1
+        except Exception as e:
+            logger.exception("extract failed for %s: %s", url, e)
+            results.append({"url": url, "error": "extract_failed"})
+
+    actual_cost = (per_url_cost * Decimal(total_urls)).quantize(Decimal("0.000001"))
+    refund_amount = Decimal("0")
+
+    try:
+        failed_count = total_urls - success_count
+        if total_urls > 0 and (failed_count / total_urls) >= 0.5:
+            refund_amount = (actual_cost * Decimal("0.5")).quantize(Decimal("0.000001"))
+            add_credits(user.id, refund_amount, reference=f"{job_id}:refund_bulk_failure")
+    except Exception:
+        logger.exception("bulk refund failed for %s", job_id)
+
+    return {
+        "job_id": job_id,
+        "total_urls": total_urls,
+        "returned": len(results),
+        "estimated_cost": float(estimated_cost),
+        "actual_cost": float(actual_cost - refund_amount),
+        "refund_amount": float(refund_amount),
+        "reserve_tx": reserve_tx,
+        "results_preview": results[:200]
+    }
