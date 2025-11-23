@@ -880,3 +880,19 @@ async def bulk_extract(file: UploadFile = File(...), request: Request = None, cu
         "reserve_tx": reserve_tx,
         "results_preview": results[:200]
     }
+
+
+job_id = f"ext-{uuid.uuid4().hex[:12]}"
+reserve_ref = f"{job_id}:reserve"
+
+# 1) Reserve credits
+try:
+    reservation = reserve_and_deduct(
+        user.id,
+        estimated_cost,
+        reference=reserve_ref,
+        job_id=job_id,
+        team_id=getattr(request.state, "team_id", None)
+    )
+except HTTPException as e:
+    raise HTTPException(status_code=e.status_code, detail=e.detail)
