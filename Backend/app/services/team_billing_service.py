@@ -187,3 +187,96 @@ def release_reservation_by_job(job_id: str):
         return {"released": len(rows)}
     finally:
         db.close()
+# backend/app/services/team_billing_service.py
+
+from decimal import Decimal
+from fastapi import HTTPException
+from backend.app.db import SessionLocal
+from backend.app.models.team import Team
+from backend.app.models.team_member import TeamMember
+from backend.app.models.credit_transaction import CreditTransaction
+from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+# ----------------------------------------------
+# GET TEAM BALANCE
+# ----------------------------------------------
+def get_team_balance(team_id: int) -> Decimal:
+    db = SessionLocal()
+    try:
+        team = db.query(Team).get(team_id)
+        if not team:
+            raise HTTPException(status_code=404, detail="team_not_found")
+
+        return Decimal(team.credits or 0)
+    finally:
+        db.close()
+
+
+# ----------------------------------------------
+# ADD CREDITS TO TEAM
+# ----------------------------------------------
+def add_team_credits(team_id: int, amount: Decimal, reference: str = None):
+    db = SessionLocal()
+    try:
+        team = db.query(Team).get(team_id)
+        if not team:
+            raise HTTPException(status_code=404, detail="team_not_found")
+
+        new_balance = Decimal(team.credits) + amount
+        team.credits = float(new_balance)
+
+        tx = CreditTransaction(
+            user_id=None,
+            amount=amount,
+            balance_after=new_balance,
+            type="team_credit",
+            reference=reference or "",
+        )
+        db.add(team)
+        db.add(tx)
+        db.commit()
+        return {"balance_after": float(new_balance)}
+    except Exception as e:
+        logger.exception("add_team_credits failed: %s", e)
+        raise HTTPException(status_code=500, detail="team_credit_error")
+    finally:
+        db.close()
+
+
+# ----------------------------------------------
+# TEAM RESERVE + DEDUCT (FIRST PRIORITY)
+# ----------------------------------------------
+def reserve_and_deduct_team(team_id: int, amount: Decimal, reference: str = None, job_id: str = None):
+    db = SessionLocal()
+    try:
+        team = db.query(Team).get(team_id)
+        if not team:
+            raise HTTPException(status_code=404, detail="team_not_found")
+
+        balance = Decimal(team.credits or 0)
+        if balance < amount:
+            raise HTTPException(status_code=402, detail="team_insufficient_credits")
+
+        new_balance = balance - amount
+        team.credits = float(new_balance)
+
+        # record as team debit
+        tx = CreditTransaction(
+            user_id=None,
+            amount=-amount,
+            balance_after=new_balance,
+            type="team_debit",
+            reference=reference or "",
+            metadata=f"team:{team_id},job:{job_id}",
+        )
+        db.add(team)
+        db.add(tx)
+        db.commit()
+
+        return {"team_id": team_id, "balance_after": float(new_balance), "reserved": float(amount)}
+    finally:
+        db.close()
