@@ -104,3 +104,83 @@ def handle_invoice_payment_failed(invoice):
                 send_webhook_async.delay(user.webhook_url, {"event": "billing.invoice_failed", "invoice_id": invoice.get("id")})
         except Exception:
             logger.exception("notify invoice_failed failed")
+# backend/app/services/stripe_handlers.py
+import stripe
+import logging
+from backend.app.config import settings
+from backend.app.db import SessionLocal
+from backend.app.models.user import User
+from backend.app.services.credits_service import add_credits
+from backend.app.services.webhook_dispatcher import send_webhook_async
+
+logger = logging.getLogger(__name__)
+stripe.api_key = settings.STRIPE_SECRET_KEY
+
+def _find_user_by_customer(customer_id: str):
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.stripe_customer_id == customer_id).first()
+        return user
+    finally:
+        db.close()
+
+# existing handlers... (handle_checkout_session, handle_invoice_paid, handle_invoice_payment_failed)
+
+# ---------------------------
+# Subscription event handlers
+# ---------------------------
+def handle_subscription_created(sub):
+    """
+    Called on 'customer.subscription.created'
+    Store minimal info in user metadata if needed (we rely on stripe for truth).
+    Optionally, notify user / admin.
+    """
+    logger.info("Stripe subscription.created %s", sub.get("id"))
+    customer = sub.get("customer")
+    user = _find_user_by_customer(customer) if customer else None
+    # Example: send webhook to user if they provided webhook_url
+    if user and getattr(user, "webhook_url", None):
+        try:
+            send_webhook_async.delay(user.webhook_url, {"event":"subscription.created","subscription":sub})
+        except Exception:
+            logger.exception("notify subscription.created failed")
+
+def handle_subscription_updated(sub):
+    logger.info("Stripe subscription.updated %s", sub.get("id"))
+    customer = sub.get("customer")
+    user = _find_user_by_customer(customer) if customer else None
+    if user and getattr(user, "webhook_url", None):
+        try:
+            send_webhook_async.delay(user.webhook_url, {"event":"subscription.updated","subscription":sub})
+        except Exception:
+            logger.exception("notify subscription.updated failed")
+
+def handle_subscription_deleted(sub):
+    logger.info("Stripe subscription.deleted %s", sub.get("id"))
+    customer = sub.get("customer")
+    user = _find_user_by_customer(customer) if customer else None
+    if user and getattr(user, "webhook_url", None):
+        try:
+            send_webhook_async.delay(user.webhook_url, {"event":"subscription.deleted","subscription":sub})
+        except Exception:
+            logger.exception("notify subscription.deleted failed")
+
+# ---------------------------
+# Admin-level helper to cancel subscription
+# ---------------------------
+def cancel_subscription_on_stripe(subscription_id: str, at_period_end: bool = True):
+    """
+    Cancel a subscription on Stripe.
+    at_period_end=True => set cancel_at_period_end
+    at_period_end=False => cancel immediately
+    """
+    try:
+        if at_period_end:
+            sub = stripe.Subscription.modify(subscription_id, cancel_at_period_end=True)
+        else:
+            sub = stripe.Subscription.delete(subscription_id)
+        return sub
+    except stripe.error.InvalidRequestError as e:
+        logger.exception("Stripe cancel failed: %s", e)
+        raise
+
