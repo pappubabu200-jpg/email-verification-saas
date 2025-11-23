@@ -63,5 +63,22 @@ celery_app.conf.beat_schedule.update({
     }
 })
 
+@celery_app.task
+def recover_dead_jobs():
+    db = SessionLocal()
+    try:
+        stuck = db.query(BulkJob).filter(
+            BulkJob.status.in_(["queued", "processing"])
+        ).all()
 
+        for job in stuck:
+            # if job older than 45 minutes = dead
+            if (datetime.utcnow() - job.created_at).seconds > 2700:
+                job.status = "error"
+                job.error_message = "auto_recovered_stuck_job"
+                db.add(job)
+        db.commit()
+    finally:
+        db.close()
+        
 
