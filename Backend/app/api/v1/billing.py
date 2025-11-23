@@ -32,3 +32,34 @@ def assign_plan(user_id: int, plan_name: str, admin = Depends(get_current_admin)
         return {"ok": True, "user_id": user.id, "plan": plan.name}
     finally:
         db.close()
+
+
+from fastapi import APIRouter, Depends, HTTPException
+from backend.app.utils.security import get_current_user
+from backend.app.config import settings
+import stripe
+
+stripe.api_key = settings.STRIPE_SECRET_KEY
+
+router = APIRouter(prefix="/api/v1/billing", tags=["billing"])
+
+@router.get("/portal")
+def create_billing_portal_session(current_user=Depends(get_current_user)):
+    """
+    Creates a Stripe Billing Portal session.
+    User can manage:
+    - subscriptions
+    - invoices
+    - cards
+    - billing info
+    """
+    if not current_user.stripe_customer_id:
+        raise HTTPException(status_code=400, detail="customer_not_initialized")
+
+    session = stripe.billing_portal.Session.create(
+        customer=current_user.stripe_customer_id,
+        return_url=settings.FRONTEND_URL + "/dashboard/billing"
+    )
+
+    return {"url": session.url}
+
