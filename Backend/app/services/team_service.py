@@ -310,3 +310,138 @@ def add_member(team_id: int, user_id: int, role: str = "member"):
 
 backend.app.db
 
+# backend/app/services/team_service.py
+
+import logging
+from fastapi import HTTPException
+from backend.app.db import SessionLocal
+from backend.app.models.team import Team
+from backend.app.models.team_member import TeamMember
+from backend.app.models.user import User
+
+logger = logging.getLogger(__name__)
+
+
+# ----------------------------------------------------
+# TEAM CREATION
+# ----------------------------------------------------
+def create_team(owner_id: int, name: str) -> Team:
+    db = SessionLocal()
+    try:
+        team = Team(name=name, owner_id=owner_id)
+        db.add(team)
+        db.commit()
+        db.refresh(team)
+
+        # owner becomes admin member
+        tm = TeamMember(team_id=team.id, user_id=owner_id, role="owner")
+        db.add(tm)
+        db.commit()
+
+        return team
+    except Exception as e:
+        logger.exception("create_team failed: %s", e)
+        raise HTTPException(status_code=500, detail="create_team_failed")
+    finally:
+        db.close()
+
+
+# ----------------------------------------------------
+# MEMBERSHIP CHECKS
+# ----------------------------------------------------
+def is_user_member_of_team(user_id: int, team_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        mem = db.query(TeamMember).filter(
+            TeamMember.team_id == team_id,
+            TeamMember.user_id == user_id
+        ).first()
+        return mem is not None
+    finally:
+        db.close()
+
+
+def is_user_team_admin(user_id: int, team_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        mem = db.query(TeamMember).filter(
+            TeamMember.team_id == team_id,
+            TeamMember.user_id == user_id
+        ).first()
+        if not mem:
+            return False
+        return mem.role in ("owner", "admin")
+    finally:
+        db.close()
+
+
+# ----------------------------------------------------
+# ADD MEMBER
+# ----------------------------------------------------
+def add_member(team_id: int, user_id: int, role: str = "member") -> dict:
+    db = SessionLocal()
+    try:
+        existing = db.query(TeamMember).filter(
+            TeamMember.team_id == team_id,
+            TeamMember.user_id == user_id
+        ).first()
+
+        if existing:
+            return {"ok": True, "message": "already_member"}
+
+        tm = TeamMember(team_id=team_id, user_id=user_id, role=role)
+        db.add(tm)
+        db.commit()
+        return {"ok": True}
+    except Exception as e:
+        logger.exception("add_member failed: %s", e)
+        raise HTTPException(status_code=500, detail="add_member_failed")
+    finally:
+        db.close()
+
+
+# ----------------------------------------------------
+# REMOVE MEMBER
+# ----------------------------------------------------
+def remove_member(team_id: int, user_id: int):
+    db = SessionLocal()
+    try:
+        mem = db.query(TeamMember).filter(
+            TeamMember.team_id == team_id,
+            TeamMember.user_id == user_id
+        ).first()
+
+        if not mem:
+            raise HTTPException(status_code=404, detail="member_not_found")
+
+        db.delete(mem)
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+# ----------------------------------------------------
+# GET TEAM INFO
+# ----------------------------------------------------
+def get_team(team_id: int) -> Team:
+    db = SessionLocal()
+    try:
+        team = db.query(Team).filter(Team.id == team_id).first()
+        if not team:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        return team
+    finally:
+        db.close()
+
+
+def get_team_members(team_id: int):
+    db = SessionLocal()
+    try:
+        rows = db.query(TeamMember).filter(TeamMember.team_id == team_id).all()
+        return [
+            {"user_id": r.user_id, "role": r.role, "team_id": r.team_id}
+            for r in rows
+        ]
+    finally:
+        db.close()
