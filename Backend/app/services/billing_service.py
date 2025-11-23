@@ -99,4 +99,29 @@ def add_overage_invoice_item(customer_id: str, amount_usd: float, description: s
         description=description
         )
 
+# backend/app/services/billing_service.py
+import logging
+from backend.app.db import SessionLocal
+from backend.app.models.user import User
+from backend.app.services.credits_service import add_credits
+from decimal import Decimal
 
+logger = logging.getLogger(__name__)
+
+def topup_user_by_userid(user_id: int, credits: int, reference: str = None):
+    """
+    admin helper to topup user (used after payment)
+    """
+    db = SessionLocal()
+    try:
+        u = db.query(User).get(user_id)
+        if not u:
+            return False
+        try:
+            add_credits(user_id, int(credits), reference=reference)
+            return True
+        except Exception:
+            logger.exception("add_credits failed")
+            return False
+    finally:
+        db.close()
