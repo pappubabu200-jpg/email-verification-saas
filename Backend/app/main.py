@@ -189,4 +189,9 @@ from backend.app.api.v1 import team
 app.include_router(team.router)
 
 
+# in backend/app/main.py (or wherever you centralize routers)
+from backend.app.billing.stripe_handlers import router as stripe_billing_router
+app.include_router(stripe_billing_router)
+
+
 
