@@ -1,4 +1,5 @@
 # backend/app/workers/bulk_tasks.py
+
 import io
 import csv
 import json
@@ -6,6 +7,7 @@ import os
 import zipfile
 import logging
 from decimal import Decimal, ROUND_HALF_UP
+
 from backend.app.celery_app import celery_app
 from backend.app.db import SessionLocal
 from backend.app.models.bulk_job import BulkJob
@@ -15,28 +17,29 @@ from backend.app.services.credits_service import capture_reservation, get_user_b
 from backend.app.services.team_billing_service import capture_reservation_and_charge, release_reservation_by_job
 from backend.app.services.pricing_service import get_cost_for_key
 from backend.app.models.credit_reservation import CreditReservation
-from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
 OUTPUT_PREFIX = "outputs/bulk"
+
 def _dec(x) -> Decimal:
     return Decimal(str(x)).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
-
 
 @celery_app.task(bind=True, name="bulk.process_bulk_task", max_retries=3)
 def process_bulk_task(self, job_id: str, estimated_cost: float = 0.0):
     """
     Worker: process a BulkJob. Steps:
-     - load job row
-     - load input file from MinIO (s3://bucket/...) or disk
-     - parse emails
-     - verify each email (verify_email_sync)
-     - write results JSON/CSV to MinIO
-     - update BulkJob row (processed, valid, invalid, output_path, status)
-     - finalize reservation(s): capture/reserve or refund policy
+    
+    - load job row
+    - load input file from MinIO (s3://bucket/...) or disk
+    - parse emails
+    - verify each email (verify_email_sync)
+    - write results JSON/CSV to MinIO
+    - update BulkJob row (processed, valid, invalid, output_path, status)
+    - finalize reservation(s): capture/reserve or refund policy
     """
     db = SessionLocal()
+
     try:
         job = db.query(BulkJob).filter(BulkJob.job_id == job_id).first()
         if not job:
@@ -120,8 +123,8 @@ def process_bulk_task(self, job_id: str, estimated_cost: float = 0.0):
         processed = 0
         valid = 0
         invalid = 0
-
         results = []
+
         for e in unique:
             try:
                 r = verify_email_sync(e, user_id=job.user_id)
@@ -140,18 +143,29 @@ def process_bulk_task(self, job_id: str, estimated_cost: float = 0.0):
         ensure_bucket()
         out_json_obj = f"{OUTPUT_PREFIX}/{job.job_id}.json"
         out_csv_obj = f"{OUTPUT_PREFIX}/{job.job_id}.csv"
+        json_bytes = json.dumps({
+            "job_id": job.job_id,
+            "total": total,
+            "processed": processed,
+            "valid": valid,
+            "invalid": invalid,
+            "results_preview": results[:100]
+        }, indent=2).encode("utf-8")
 
-        json_bytes = json.dumps({"job_id": job.job_id, "total": total, "processed": processed, "valid": valid, "invalid": invalid, "results_preview": results[:100]}, indent=2).encode("utf-8")
         csv_buffer = io.StringIO()
         writer = csv.writer(csv_buffer)
         writer.writerow(["email", "status", "risk_score", "raw"])
         for r in results:
             if "result" in r:
                 rr = r["result"]
-                writer.writerow([r["email"], rr.get("status"), rr.get("risk_score"), json.dumps(rr.get("details") or rr.get("raw") or {})])
+                writer.writerow([
+                    r["email"], 
+                    rr.get("status"), 
+                    rr.get("risk_score"),
+                    json.dumps(rr.get("details") or rr.get("raw") or {})
+                ])
             else:
                 writer.writerow([r.get("email"), "error", "", "verify_failed"])
-
         try:
             put_bytes(out_json_obj, json_bytes, content_type="application/json")
             put_bytes(out_csv_obj, csv_buffer.getvalue().encode("utf-8"), content_type="text/csv")
@@ -169,100 +183,46 @@ def process_bulk_task(self, job_id: str, estimated_cost: float = 0.0):
 
         # finalize reservations: capture or release depending on team/user
         try:
-            # find locked reservations for this job
-            reservations = db.query(CreditReservation).filter(CreditReservation.job_id==job.job_id, CreditReservation.locked==True).all()
+            reservations = db.query(CreditReservation).filter(
+                CreditReservation.job_id == job.job_id,
+                CreditReservation.locked == True
+            ).all()
             total_processed = Decimal(processed)
             cost_per = Decimal(str(get_cost_for_key("verify.bulk_per_email") or 0))
             actual_cost = (cost_per * total_processed).quantize(Decimal("0.000001"))
             remain = actual_cost
 
             for r in reservations:
-                # team reservation
                 if getattr(r, "team_id", None):
-                    # capture team reservation (may be partial depending on amounts)
                     try:
-                        capture_res = capture_reservation_and_charge(r.id, type_="bulk_charge", reference=f"bulk:{job.job_id}")
-                        # reduce remain accordingly
+                        capture_res = capture_reservation_and_charge(
+                            r.id, type_="bulk_charge", reference=f"bulk:{job.job_id}"
+                        )
                         remain -= Decimal(r.amount)
                     except Exception:
                         logger.exception("capture team reservation failed %s", r.id)
                 else:
-                    # user reservation: capture fully (assumes reservation.amount <= estimated)
                     try:
-                        capture_res = capture_reservation(r.id, type_="bulk_charge", reference=f"bulk:{job.job_id}")
+                        capture_res = capture_reservation(
+                            r.id, type_="bulk_charge", reference=f"bulk:{job.job_id}"
+                        )
                         remain -= Decimal(r.amount)
                     except Exception:
                         logger.exception("capture user reservation failed %s", r.id)
-
-            # if remain < 0 means we charged more than needed; admin reconcile later.
-            # if remain > 0 and there are no more reservations -> try refund remain to owner (best-effort)
             if remain > 0:
-                # attempt to refund to job owner (user)
                 try:
                     from backend.app.services.credits_service import add_credits as user_add_credits
                     user_add_credits(job.user_id, remain, reference=f"{job.job_id}:auto_refund_remaining")
                 except Exception:
                     logger.exception("auto refund remaining failed for %s remain=%s", job.job_id, remain)
-
         except Exception:
             logger.exception("reservation finalize failed for job %s", job.job_id)
-
-     # -------------------------------------------------
-# 📌 FINAL BILLING STEP: Capture or Refund Credits
-# -------------------------------------------------
-from backend.app.models.credit_reservation import CreditReservation
-from backend.app.services.credits_service import (
-    capture_reservation_and_charge,
-    release_reservation,
-    add_credits
-)
-
-try:
-    # Find all reservations tied to this job
-    reservations = db.query(CreditReservation).filter(
-        CreditReservation.job_id == job.job_id,
-        CreditReservation.locked == True
-    ).all()
-
-    cost_per = Decimal(str(get_cost_for_key("verify.bulk_per_email") or 0))
-    actual_cost = (cost_per * Decimal(processed)).quantize(Decimal("0.000001"))
-
-    # total reserved amount from all reservations
-    total_reserved = sum([Decimal(str(r.amount)) for r in reservations])
-
-    # We need to charge `actual_cost`
-    remaining_to_charge = actual_cost
-
-    for r in reservations:
-        if remaining_to_charge <= 0:
-            # release reservation (unused)
-            release_reservation(db, r.id)
-            continue
-
-        if Decimal(str(r.amount)) <= remaining_to_charge:
-            # capture full reservation
-            capture_reservation_and_charge(
-                db,
-                r.id,
-                type_="bulk.charge",
-                reference=f"bulk_charge:{job.job_id}"
-            )
-            remaining_to_charge -= Decimal(str(r.amount))
-        else:
-            # capture partially, refund the rest
-            capture_reservation_and_charge(
-                db,
-                r.id,
-                type_="bulk.charge",
-                reference=f"bulk_charge:{job.job_id}"
-            )
-            extra = Decimal(str(r.amount)) - remaining_to_charge
-            # refund excess
-            add_credits(job.user_id, extra, reference=f"bulk_refund:{job.job_id}")
-            remaining_to_charge = Decimal("0")
-except Exception as e:
-    logger.exception("final reservation settle failed for job %s", job.job_id)   return {"job_id": job.job_id, "processed": processed, "valid": valid, "invalid": invalid}
-
+        return {
+            "job_id": job.job_id,
+            "processed": processed,
+            "valid": valid,
+            "invalid": invalid
+        }
     except Exception as exc:
         logger.exception("unexpected worker failure: %s", exc)
         try:
