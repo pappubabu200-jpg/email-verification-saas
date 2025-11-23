@@ -199,4 +199,7 @@ app.include_router(webhooks.router)
 from backend.app.api.v1 import checkout
 app.include_router(checkout.router)
 
-
+from backend.app.api.v1 import subscriptions, billing_dashboard, checkout
+app.include_router(checkout.router)
+app.include_router(subscriptions.router)
+app.include_router(billing_dashboard.router)
