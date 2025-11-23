@@ -1,3 +1,11 @@
+def release_reservation(db, reservation_id: int):
+    r = db.query(CreditReservation).get(reservation_id)
+    if not r:
+        return False
+    r.locked = False
+    db.add(r)
+    db.commit()
+    return True
 from datetime import datetime, timedelta
 from decimal import Decimal
 from backend.app.models.credit_reservation import CreditReservation
