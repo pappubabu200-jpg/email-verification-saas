@@ -32,3 +32,21 @@ async def stripe_webhook(request: Request):
                     db.commit()
         finally:
             db.close()
+
+if event["type"] in (
+    "customer.subscription.deleted",
+    "customer.subscription.updated",
+    "invoice.payment_failed"
+):
+    sub = event["data"]["object"]
+    customer_id = sub["customer"]
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.stripe_customer_id == customer_id).first()
+        if user:
+            user.plan = "free"
+            db.add(user)
+            db.commit()
+    finally:
+        db.close()
