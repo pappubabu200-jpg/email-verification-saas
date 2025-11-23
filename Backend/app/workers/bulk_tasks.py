@@ -268,5 +268,82 @@ for r in reservations:
     except Exception:
         logger.exception("capture reservation %s failed", r.id)
 # if remain > 0 => admin reconciliation may be needed (or leave as is)
+# ======================================
+# 💳 FINALIZE RESERVATIONS (TEAM + USER)
+# ======================================
+from backend.app.models.credit_reservation import CreditReservation
+from backend.app.services.team_billing_service import (
+    capture_team_reservation_and_charge,
+    release_team_reservation,
+)
+from backend.app.services.credits_service import (
+    capture_reservation_and_charge,
+    release_reservation_by_job,
+)
+from backend.app.services.pricing_service import get_cost_for_key
 
+try:
+    # 1) Load all reservations for this job
+    reservations = (
+        db.query(CreditReservation)
+        .filter(CreditReservation.job_id == job.job_id, CreditReservation.locked == True)
+        .all()
+    )
+
+    # 2) Compute ACTUAL COST (based on processed emails)
+    cost_per = Decimal(str(get_cost_for_key("verify.bulk_per_email") or 0))
+    actual_cost = (cost_per * Decimal(processed)).quantize(Decimal("0.000001"))
+
+    remaining_cost = actual_cost
+
+    # 3) Capture reservations until cost is covered
+    for r in reservations:
+        if remaining_cost <= 0:
+            # release any remaining reservations
+            release_reservation_by_job(job.job_id)
+            break
+
+        r_amount = Decimal(str(r.amount))
+
+        # TEAM reservation (reference like "team:5")
+        if r.reference and r.reference.startswith("team:"):
+            try:
+                team_id = int(r.reference.split("team:")[1].split(":")[0])
+
+                capture_team_reservation_and_charge(
+                    db,
+                    reservation_id=r.id,
+                    team_id=team_id,
+                    type_="bulk.charge",
+                    reference=f"bulk:{job.job_id}",
+                )
+
+                remaining_cost -= r_amount
+                continue
+            except Exception as e:
+                logger.exception("Team reservation capture failed: %s", e)
+                continue
+
+        # USER reservation
+        try:
+            capture_reservation_and_charge(
+                db,
+                reservation_id=r.id,
+                type_="bulk.charge",
+                reference=f"bulk:{job.job_id}",
+            )
+            remaining_cost -= r_amount
+        except Exception as e:
+            logger.exception("User reservation capture failed: %s", e)
+
+    # 4) EXTRA: if some cost remains unpaid (should not happen normally)
+    if remaining_cost > 0:
+        logger.error(
+            "BulkJob %s: WARNING — remaining cost %s could not be charged",
+            job.job_id,
+            str(remaining_cost),
+        )
+
+except Exception as e:
+    logger.exception("Reservation finalize failed for job %s: %s", job.job_id, e)
 
