@@ -194,4 +194,6 @@ from backend.app.billing.stripe_handlers import router as stripe_billing_router
 app.include_router(stripe_billing_router)
 
 
+from backend.app.api.v1 import webhooks
+app.include_router(webhooks.router)
 
