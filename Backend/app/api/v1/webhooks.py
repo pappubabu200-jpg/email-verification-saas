@@ -96,3 +96,33 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
     return {"ok": True}
 
 
+# inside backend/app/api/v1/webhooks.py (event dispatching part)
+from backend.app.services.stripe_handlers import (
+    handle_checkout_session,
+    handle_invoice_paid,
+    handle_invoice_payment_failed,
+    handle_subscription_created,
+    handle_subscription_updated,
+    handle_subscription_deleted,
+)
+
+# After parsing `event` and `obj`:
+evt_type = event["type"]
+obj = event["data"]["object"]
+
+try:
+    if evt_type == "checkout.session.completed":
+        handle_checkout_session(obj)
+    elif evt_type in ("invoice.payment_succeeded", "invoice.paid"):
+        handle_invoice_paid(obj)
+    elif evt_type == "invoice.payment_failed":
+        handle_invoice_payment_failed(obj)
+    elif evt_type == "customer.subscription.created":
+        handle_subscription_created(obj)
+    elif evt_type == "customer.subscription.updated":
+        handle_subscription_updated(obj)
+    elif evt_type == "customer.subscription.deleted":
+        handle_subscription_deleted(obj)
+    # add other event types if you wish
+except Exception:
+    logger.exception("Failed to handle stripe event: %s", evt_type)
