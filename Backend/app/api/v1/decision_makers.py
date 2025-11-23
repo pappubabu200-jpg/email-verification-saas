@@ -408,4 +408,111 @@ def search(payload: DecisionSearchIn, request: Request, current_user = Depends(g
     }
 
 
+# backend/app/api/v1/decision_makers.py
+from fastapi import APIRouter, Request, Depends, HTTPException
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+import uuid
+from decimal import Decimal, ROUND_HALF_UP
+
+from backend.app.db import SessionLocal
+from backend.app.services.decision_maker_service import search_decision_makers
+from backend.app.services.pricing_service import get_cost_for_key
+from backend.app.services.credits_service import reserve_and_deduct, add_credits, get_user_balance
+from backend.app.services.plan_service import get_plan_by_name
+from backend.app.services.team_service import is_user_member_of_team
+from backend.app.utils.security import get_current_user
+
+router = APIRouter(prefix="/api/v1/decision-makers", tags=["decision-makers"])
+
+def _decimal(x) -> Decimal:
+    return Decimal(str(x)).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+
+class DecisionSearchIn(BaseModel):
+    domain: Optional[str] = None
+    company: Optional[str] = None
+    max_results: int = 25
+    use_cache: bool = True
+
+@router.post("/search")
+def search(payload: DecisionSearchIn, request: Request, current_user = Depends(get_current_user)):
+    """
+    Decision Maker Finder endpoint with team billing + reservation + refunds.
+    """
+    user = current_user
+    if not user:
+        raise HTTPException(status_code=401, detail="auth_required")
+
+    chosen_team = getattr(request.state, "team_id", None)
+
+    # if client passed team_id in payload (not recommended) - validate same
+    if hasattr(payload, "team_id") and getattr(payload, "team_id", None):
+        chosen_team = getattr(payload, "team_id")
+
+    if chosen_team:
+        if not is_user_member_of_team(user.id, chosen_team):
+            raise HTTPException(status_code=403, detail="not_team_member")
+
+    # enforce plan limit on max_results
+    if hasattr(user, "plan") and user.plan:
+        plan = get_plan_by_name(user.plan)
+        if plan and plan.daily_search_limit and payload.max_results > plan.daily_search_limit:
+            raise HTTPException(status_code=429, detail=f"max_results_exceeds_plan_limit ({plan.daily_search_limit})")
+
+    # pricing
+    cost_per_result = _decimal(get_cost_for_key("decision_maker.search_per_result") or 0)
+    estimated_cost = (cost_per_result * Decimal(payload.max_results)).quantize(Decimal("0.000001"))
+
+    job_id = f"dmjob-{uuid.uuid4().hex[:12]}"
+    reserve_ref = f"{job_id}:reserve"
+
+    # reserve credits team-first
+    try:
+        reserve_tx = reserve_and_deduct(user.id, estimated_cost, reference=reserve_ref, team_id=chosen_team, job_id=job_id) if estimated_cost > 0 else {"balance_after": float(get_user_balance(user.id))}
+    except HTTPException as e:
+        # pass through 402 to client
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+    # perform search (uses configured external clients inside search_decision_makers)
+    try:
+        # Pass caller_api_key if present (API-key middleware may attach api_key_row)
+        api_key_row = getattr(request.state, "api_key_row", None)
+        caller_api_key = api_key_row.key if api_key_row else None
+
+        results = search_decision_makers(domain=payload.domain, company_name=payload.company, max_results=payload.max_results, use_cache=payload.use_cache, caller_api_key=caller_api_key)
+    except Exception as e:
+        # refund on error
+        try:
+            add_credits(user.id, estimated_cost, reference=f"{job_id}:refund_on_error")
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="decision_search_failed")
+
+    # calculate actual cost & refund difference
+    actual_count = len(results or [])
+    actual_cost = (cost_per_result * Decimal(actual_count)).quantize(Decimal("0.000001"))
+    refund_amount = (estimated_cost - actual_cost).quantize(Decimal("0.000001")) if estimated_cost > actual_cost else Decimal("0")
+
+    refund_tx = None
+    if refund_amount > 0:
+        try:
+            add_credits(user.id, refund_amount, reference=f"{job_id}:refund")
+            refund_tx = {"refunded": float(refund_amount)}
+        except Exception:
+            refund_tx = {"error": "refund_failed"}
+
+    response = {
+        "job_id": job_id,
+        "requested_max_results": payload.max_results,
+        "returned_results": actual_count,
+        "cost_per_result": float(cost_per_result),
+        "estimated_cost": float(estimated_cost),
+        "actual_cost": float(actual_cost),
+        "refund_amount": float(refund_amount),
+        "results": results,
+        "reserve_tx": reserve_tx,
+        "refund_tx": refund_tx,
+    }
+    return response
+
 
