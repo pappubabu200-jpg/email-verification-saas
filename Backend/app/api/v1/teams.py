@@ -123,3 +123,73 @@ def api_my_teams(current_user = Depends(get_current_user)):
 def api_list_members(team_id: int, current_user = Depends(get_current_user)):
     members = list_team_members(team_id)
     return {"members": [{"id": m.id, "user_id": m.user_id, "role": m.role, "invited": m.invited} for m in members]}
+
+
+# backend/app/api/v1/teams.py
+from fastapi import APIRouter, Depends, HTTPException, Body
+from backend.app.utils.security import get_current_user
+from backend.app.services.team_billing_service import (
+    get_team_balance, add_team_credits, add_team_member, remove_team_member, is_user_member_of_team
+)
+from backend.app.db import SessionLocal
+from backend.app.models.team import Team
+from backend.app.models.team_member import TeamMember
+
+router = APIRouter(prefix="/api/v1/teams", tags=["teams"])
+
+@router.post("/create")
+def create_team(name: str = Body(...), current_user = Depends(get_current_user)):
+    db = SessionLocal()
+    try:
+        t = Team(name=name, owner_user_id=current_user.id, credits=0)
+        db.add(t); db.commit(); db.refresh(t)
+        # add owner as team_member with billing rights
+        tm = TeamMember(team_id=t.id, user_id=current_user.id, role="owner", can_billing=True, active=True)
+        db.add(tm); db.commit()
+        return {"team_id": t.id, "name": t.name}
+    finally:
+        db.close()
+
+@router.get("/{team_id}/balance")
+def team_balance(team_id: int, current_user = Depends(get_current_user)):
+    if not is_user_member_of_team(current_user.id, team_id):
+        raise HTTPException(403, "not_team_member")
+    bal = get_team_balance(team_id)
+    return {"team_id": team_id, "balance": float(bal)}
+
+@router.post("/{team_id}/topup")
+def topup(team_id: int, amount: float = Body(...), current_user = Depends(get_current_user)):
+    if not is_user_member_of_team(current_user.id, team_id):
+        raise HTTPException(403, "not_team_member")
+    res = add_team_credits(team_id, amount, reference=f"manual_topup_by:{current_user.id}")
+    return res
+
+@router.post("/{team_id}/members/add")
+def team_add_member(team_id: int, user_id: int = Body(...), role: str = Body("member"), can_billing: bool = Body(False), current_user = Depends(get_current_user)):
+    db = SessionLocal()
+    try:
+        owner = db.query(Team).get(team_id)
+        if not owner:
+            raise HTTPException(404, "team_not_found")
+        if owner.owner_user_id != current_user.id:
+            raise HTTPException(403, "owner_only")
+        res = add_team_member(team_id, user_id, role=role, can_billing=can_billing)
+        return res
+    finally:
+        db.close()
+
+@router.post("/{team_id}/members/remove")
+def team_remove_member(team_id: int, user_id: int = Body(...), current_user = Depends(get_current_user)):
+    db = SessionLocal()
+    try:
+        owner = db.query(Team).get(team_id)
+        if not owner:
+            raise HTTPException(404, "team_not_found")
+        if owner.owner_user_id != current_user.id:
+            raise HTTPException(403, "owner_only")
+        ok = remove_team_member(team_id, user_id)
+        return {"ok": ok}
+    finally:
+        db.close()
+
+
