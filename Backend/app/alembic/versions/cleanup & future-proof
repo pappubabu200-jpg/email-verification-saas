@@ -1,1 +1,19 @@
 
+### cleanup & future-proof
+
+"""cleanup constraints"""
+
+from alembic import op
+import sqlalchemy as sa
+
+revision = "0010_cleanup"
+down_revision = "0009_seed_plans"
+branch_labels = None
+depends_on = None
+
+def upgrade():
+    # Add any extra safety constraints
+    pass
+
+def downgrade():
+    pass
