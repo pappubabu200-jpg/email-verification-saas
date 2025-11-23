@@ -183,3 +183,10 @@ def on_start():
 
 from backend.app.api.v1 import admin_extractor
 app.include_router(admin_extractor.router)
+
+
+from backend.app.api.v1 import team
+app.include_router(team.router)
+
+
+
