@@ -87,3 +87,25 @@ celery_app.conf.beat_schedule.update({
         "schedule": 600,   # 10 minutes
     }
 })
+from backend.app.services.minio_client import delete_object_if_exists
+
+@celery_app.task
+def cleanup_old_outputs():
+    THRESHOLD_DAYS = 14
+    db = SessionLocal()
+    try:
+        cutoff = datetime.utcnow() - timedelta(days=THRESHOLD_DAYS)
+        old_jobs = db.query(BulkJob).filter(
+            BulkJob.created_at < cutoff,
+            BulkJob.output_path != None
+        ).all()
+
+        for job in old_jobs:
+            try:
+                path = job.output_path.replace("s3://", "").split("/", 1)[1]
+                delete_object_if_exists(path)
+            except Exception as e:
+                logger.error("cleanup failed for %s: %s", job.output_path, e)
+    finally:
+        db.close()
+
