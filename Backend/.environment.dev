@@ -23,3 +23,4 @@ MINIO_ROOT_USER=minioadmin
 MINIO_ROOT_PASSWORD=minioadmin
 MINIO_BUCKET=email-saas
 MINIO_SECURE=False
+FRONTEND_URL=https://your-website.com
