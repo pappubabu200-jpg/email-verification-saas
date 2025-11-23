@@ -194,3 +194,40 @@ def remove_member(payload: RemovePayload, request: Request, current_user=Depends
         return {"ok": True, "removed_user_id": payload.user_id}
     finally:
         db.close()
+
+from fastapi import APIRouter, Depends, HTTPException
+from backend.app.utils.security import get_current_user
+from backend.app.services.team_service import (
+    create_team,
+    add_member,
+    remove_member,
+    get_team,
+    get_team_members,
+)
+router = APIRouter(prefix="/api/v1/team", tags=["team"])
+
+@router.post("/create")
+def create_team_api(name: str, current_user = Depends(get_current_user)):
+    return create_team(current_user.id, name)
+
+@router.post("/add-member")
+def add_member_api(team_id: int, user_id: int, role: str = "member", current_user = Depends(get_current_user)):
+    # only owner/admin should add
+    team = get_team(team_id)
+    if team.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="not_team_owner")
+    return add_member(team_id, user_id, role)
+
+@router.post("/remove-member")
+def remove_member_api(team_id: int, user_id: int, current_user = Depends(get_current_user)):
+    team = get_team(team_id)
+    if team.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="not_team_owner")
+    return remove_member(team_id, user_id)
+
+@router.get("/info/{team_id}")
+def team_info(team_id: int, current_user = Depends(get_current_user)):
+    return {
+        "team": get_team(team_id),
+        "members": get_team_members(team_id)
+    }
