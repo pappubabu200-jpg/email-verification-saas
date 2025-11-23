@@ -296,3 +296,30 @@ def release_reservation_by_job(job_id: str) -> int:
         db.close()
 
 
+def capture_reservation_and_charge(db, reservation_id: int, type_: str = "charge", reference: str = None):
+    res = db.query(CreditReservation).get(reservation_id)
+    if not res or not res.locked:
+        return False
+
+    # compute balance
+    balance = get_user_balance(res.user_id)
+    new_balance = balance - Decimal(str(res.amount))
+
+    # create credit transaction
+    tx = CreditTransaction(
+        user_id=res.user_id,
+        amount=-Decimal(str(res.amount)),
+        balance_after=new_balance,
+        type=type_,
+        reference=reference or res.reference
+    )
+    db.add(tx)
+
+    # unlock & mark reservation used
+    res.locked = False
+    db.add(res)
+
+    db.commit()
+    return True
+
+
