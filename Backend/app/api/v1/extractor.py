@@ -896,3 +896,15 @@ try:
     )
 except HTTPException as e:
     raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+
+# 2) Determine actual cost (per-page extractor is simple → cost_per)
+actual_cost = cost_per
+refund_amount = Decimal("0")
+
+# if no emails found → refund 50%
+emails_found = len(res.get("emails") or [])
+if emails_found == 0:
+    refund_amount = (estimated_cost * Decimal("0.5")).quantize(Decimal("0.000001"))
+    add_credits(user.id, refund_amount, reference=f"{job_id}:refund_no_emails")
