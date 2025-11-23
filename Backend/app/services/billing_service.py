@@ -81,3 +81,22 @@ def handle_stripe_payment_intent(event: dict):
                 db.close()
             return True
     return False
+
+
+import stripe
+from backend.app.config import settings
+stripe.api_key = settings.STRIPE_SECRET_KEY
+
+def add_overage_invoice_item(customer_id: str, amount_usd: float, description: str):
+    """
+    Creates a one-time invoice item.
+    Stripe will charge automatically.
+    """
+    stripe.InvoiceItem.create(
+        customer=customer_id,
+        amount=int(amount_usd * 100),  # cents
+        currency="usd",
+        description=description
+        )
+
+
