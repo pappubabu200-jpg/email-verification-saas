@@ -196,4 +196,7 @@ app.include_router(stripe_billing_router)
 
 from backend.app.api.v1 import webhooks
 app.include_router(webhooks.router)
+from backend.app.api.v1 import checkout
+app.include_router(checkout.router)
+
 
