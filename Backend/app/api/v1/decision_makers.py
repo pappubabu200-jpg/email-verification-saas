@@ -191,3 +191,6 @@ def search(payload: DecisionSearchIn, request: Request, current_user=Depends(get
         "reserve_tx": reserve_res,
         "refund_tx": refund_tx,
     }
+
+reserve_res = reserve_and_deduct(user.id, estimated_cost, reference=reserve_ref, team_id=chosen_team, job_id=job_id)
+
