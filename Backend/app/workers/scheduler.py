@@ -109,3 +109,21 @@ def cleanup_old_outputs():
     finally:
         db.close()
 
+@router.get("/my-jobs")
+def list_my_jobs(
+    status: str = None,
+    page: int = 1,
+    per_page: int = 20,
+    current_user = Depends(get_current_user)
+):
+    db = SessionLocal()
+    q = db.query(BulkJob).filter(BulkJob.user_id == current_user.id)
+
+    if status:
+        q = q.filter(BulkJob.status == status)
+
+    total = q.count()
+    jobs = q.order_by(BulkJob.created_at.desc())\
+            .limit(per_page)\
+            .offset((page - 1) * per_page)\
+            .all()
