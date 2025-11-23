@@ -280,3 +280,137 @@ def reserve_and_deduct_team(team_id: int, amount: Decimal, reference: str = None
         return {"team_id": team_id, "balance_after": float(new_balance), "reserved": float(amount)}
     finally:
         db.close()
+
+# backend/app/services/team_billing_service.py
+from decimal import Decimal
+from datetime import datetime, timedelta
+from typing import Optional
+import logging
+
+from fastapi import HTTPException
+from sqlalchemy.orm import Session
+
+from backend.app.db import SessionLocal
+from backend.app.models.team import Team
+from backend.app.models.team_member import TeamMember
+from backend.app.models.team_transaction import TeamTransaction
+from backend.app.models.credit_reservation import CreditReservation
+
+logger = logging.getLogger(__name__)
+RESERVATION_TTL = 3600  # seconds (1 hour)
+
+def _dec(x) -> Decimal:
+    return Decimal(str(x))
+
+def get_team_balance(team_id: int) -> Decimal:
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(404, "team_not_found")
+        return _dec(t.credits or 0)
+    finally:
+        db.close()
+
+def add_team_credits(team_id: int, amount: Decimal, reference: Optional[str] = None) -> dict:
+    amount = _dec(amount)
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(404, "team_not_found")
+        new_bal = _dec(t.credits or 0) + amount
+        t.credits = float(new_bal)
+        tr = TeamTransaction(team_id=team_id, amount=float(amount), balance_after=float(new_bal), type="topup", reference=reference or "")
+        db.add(tr); db.add(t); db.commit(); db.refresh(tr)
+        return {"balance_after": float(new_bal), "transaction_id": tr.id}
+    finally:
+        db.close()
+
+def reserve_and_deduct_team(team_id: int, amount: Decimal, reference: Optional[str] = None, job_id: Optional[str] = None) -> dict:
+    """
+    Create a reservation that will be captured later against the team pool.
+    Reservation uses CreditReservation table; reference tagged with team id "team:{team_id}".
+    """
+    amount = _dec(amount)
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(404, "team_not_found")
+        balance = _dec(t.credits or 0)
+        if balance < amount:
+            raise HTTPException(402, "insufficient_team_credits")
+        expires_at = datetime.utcnow() + timedelta(seconds=RESERVATION_TTL)
+        reservation = CreditReservation(
+            user_id=None,
+            amount=float(amount),
+            job_id=job_id,
+            locked=True,
+            expires_at=expires_at,
+            reference=reference or f"team:{team_id}"
+        )
+        db.add(reservation)
+        db.commit(); db.refresh(reservation)
+        return {"reservation_id": reservation.id, "reserved_amount": float(amount), "job_id": job_id}
+    finally:
+        db.close()
+
+def capture_team_reservation_and_charge(db: Session, reservation_id: int, team_id: int, type_: str = "charge", reference: Optional[str] = None):
+    res = db.query(CreditReservation).get(reservation_id)
+    if not res or not res.locked:
+        raise HTTPException(404, "reservation_not_found_or_unlocked")
+    t = db.query(Team).get(team_id)
+    if not t:
+        raise HTTPException(404, "team_not_found")
+    amt = _dec(res.amount)
+    bal = _dec(t.credits or 0)
+    if bal < amt:
+        raise HTTPException(402, "team_insufficient_at_capture")
+    new_bal = bal - amt
+    t.credits = float(new_bal)
+    tr = TeamTransaction(team_id=team_id, amount=-float(amt), balance_after=float(new_bal), type=type_, reference=reference or res.reference)
+    res.locked = False
+    db.add(t); db.add(tr); db.add(res); db.commit()
+    return tr
+
+def release_team_reservation(db: Session, reservation_id: int):
+    res = db.query(CreditReservation).get(reservation_id)
+    if not res or not res.locked:
+        return False
+    res.locked = False
+    db.commit()
+    return True
+
+# membership helpers
+def is_user_member_of_team(user_id: int, team_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        m = db.query(TeamMember).filter(TeamMember.team_id == team_id, TeamMember.user_id == user_id, TeamMember.active == True).first()
+        return bool(m)
+    finally:
+        db.close()
+
+def add_team_member(team_id: int, user_id: int, role: str = "member", can_billing: bool = False) -> dict:
+    db = SessionLocal()
+    try:
+        tm = TeamMember(team_id=team_id, user_id=user_id, role=role, can_billing=can_billing)
+        db.add(tm); db.commit(); db.refresh(tm)
+        return {"ok": True, "team_member_id": tm.id}
+    finally:
+        db.close()
+
+def remove_team_member(team_id: int, user_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        m = db.query(TeamMember).filter(TeamMember.team_id==team_id, TeamMember.user_id==user_id).first()
+        if not m:
+            return False
+        m.active = False
+        db.add(m); db.commit()
+        return True
+    finally:
+        db.close()
+
+
+
