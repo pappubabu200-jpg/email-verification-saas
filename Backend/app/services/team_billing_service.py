@@ -506,5 +506,127 @@ def capture_reservation_and_charge_team(reservation_id: int, type_: str = "team_
         db.close()
 
 
+# backend/app/services/team_billing_service.py
+from decimal import Decimal
+from backend.app.db import SessionLocal
+from backend.app.models.team import Team
+from backend.app.models.team_member import TeamMember
+from backend.app.models.credit_transaction import CreditTransaction
+from backend.app.models.credit_reservation import CreditReservation
+from fastapi import HTTPException
+from datetime import datetime, timedelta
+
+RESERVATION_TTL_SECONDS = 60 * 60  # 1 hour
+
+def is_user_member_of_team(db, user_id: int, team_id: int) -> bool:
+    m = db.query(TeamMember).filter(TeamMember.user_id == user_id, TeamMember.team_id == team_id, TeamMember.active == True).first()
+    return bool(m)
+
+def get_team_balance(team_id: int) -> Decimal:
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        return Decimal(t.credits or 0)
+    finally:
+        db.close()
+
+def add_team_credits(team_id: int, amount: Decimal, reference: str = None):
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        # update numeric credits
+        t.credits = (Decimal(t.credits or 0) + Decimal(amount))
+        # record transaction on owner's ledger for traceability
+        tx = CreditTransaction(user_id=t.owner_id, amount=float(amount), balance_after=float(t.credits), type="team_credit", reference=reference or f"team:{team_id}")
+        db.add(tx)
+        db.add(t)
+        db.commit()
+        db.refresh(tx)
+        return {"balance_after": float(t.credits), "tx_id": tx.id}
+    finally:
+        db.close()
+
+def reserve_and_deduct_team(team_id: int, amount: Decimal, reference: str = None, job_id: str = None):
+    """
+    Reserve credits from team pool (atomic-ish).
+    Creates CreditReservation with user_id set to team.owner_id for compatibility.
+    """
+    db = SessionLocal()
+    try:
+        t = db.query(Team).get(team_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="team_not_found")
+        if Decimal(t.credits or 0) < Decimal(amount):
+            raise HTTPException(status_code=402, detail="insufficient_team_credits")
+        # decrement team credits immediately (prevent double reservation)
+        t.credits = (Decimal(t.credits or 0) - Decimal(amount))
+        expires_at = datetime.utcnow() + timedelta(seconds=RESERVATION_TTL_SECONDS)
+        res = CreditReservation(user_id=t.owner_id, amount=float(amount), job_id=job_id, locked=True, expires_at=expires_at, reference=f"team:{team_id}:{reference or ''}")
+        db.add(res)
+        db.add(t)
+        db.commit()
+        db.refresh(res)
+        return {"reservation_id": res.id, "reserved_amount": float(amount), "team_balance_after": float(t.credits)}
+    finally:
+        db.close()
+
+def capture_reservation_and_charge_team(reservation_id: int, type_: str = "team_charge", reference: str = None):
+    db = SessionLocal()
+    try:
+        res = db.query(CreditReservation).get(reservation_id)
+        if not res:
+            raise HTTPException(status_code=404, detail="reservation_not_found")
+        if not res.locked:
+            raise HTTPException(status_code=400, detail="reservation_not_locked")
+        # mark unlocked and write transaction for owner (user_id stored there)
+        owner_id = res.user_id
+        # compute last balance for owner via transactions
+        last_tx = db.query(CreditTransaction).filter(CreditTransaction.user_id==owner_id).order_by(CreditTransaction.created_at.desc()).limit(1).all()
+        current = Decimal(last_tx[0].balance_after) if last_tx else Decimal(0)
+        new_balance = current - Decimal(res.amount)
+        tx = CreditTransaction(user_id=owner_id, amount=-float(res.amount), balance_after=float(new_balance), type=type_, reference=reference or f"team_charge:{res.id}")
+        res.locked = False
+        db.add(tx)
+        db.add(res)
+        db.commit()
+        db.refresh(tx)
+        return {"tx_id": tx.id, "balance_after": float(new_balance)}
+    finally:
+        db.close()
+
+def release_reservation_team(reservation_id: int):
+    db = SessionLocal()
+    try:
+        res = db.query(CreditReservation).get(reservation_id)
+        if not res:
+            return False
+        if not res.locked:
+            return False
+        # try to recover amount back to team: parse team id from reference if present
+        ref = (res.reference or "")
+        team_id = None
+        if ref.startswith("team:"):
+            try:
+                maybe = ref.split(":")[1]
+                team_id = int(maybe)
+            except Exception:
+                team_id = None
+        if team_id:
+            t = db.query(Team).get(team_id)
+            if t:
+                t.credits = (Decimal(t.credits or 0) + Decimal(res.amount))
+                db.add(t)
+        res.locked = False
+        db.add(res)
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
 
 
