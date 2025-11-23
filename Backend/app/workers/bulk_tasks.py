@@ -234,3 +234,39 @@ def process_bulk_task(self, job_id: str, estimated_cost: float = 0.0):
         raise
     finally:
         db.close()
+
+# after processing job and writing outputs — find reservations by job_id
+from backend.app.models.credit_reservation import CreditReservation
+from backend.app.services.team_billing_service import capture_team_reservation_and_charge
+from backend.app.services.credits_service import capture_reservation_and_charge
+
+# fetch reservations for this job
+reservations = db.query(CreditReservation).filter(CreditReservation.job_id==job.job_id, CreditReservation.locked==True).all()
+actual_cost = (Decimal(str(get_cost_for_key("verify.bulk_per_email") or 0)) * Decimal(processed)).quantize(Decimal("0.000001"))
+# simple approach: capture reservations one by one up to actual_cost
+remain = actual_cost
+for r in reservations:
+    if remain <= 0:
+        # release any remaining reservations for this job
+        release_reservation_by_job(job.job_id)
+        break
+    try:
+        if r.reference and isinstance(r.reference, str) and r.reference.startswith("team:"):
+            # extract team id
+            try:
+                team_id = int(r.reference.split("team:")[1].split(":")[0])
+            except Exception:
+                # fallback if format differs
+                team_id = None
+            if team_id:
+                capture_team_reservation_and_charge(db, r.id, team_id=team_id, type_="bulk.charge", reference=f"bulk:{job.job_id}")
+                remain -= Decimal(str(r.amount))
+                continue
+        # else capture user reservation
+        capture_reservation_and_charge(db, r.id, type_="bulk.charge", reference=f"bulk:{job.job_id}")
+        remain -= Decimal(str(r.amount))
+    except Exception:
+        logger.exception("capture reservation %s failed", r.id)
+# if remain > 0 => admin reconciliation may be needed (or leave as is)
+
+
