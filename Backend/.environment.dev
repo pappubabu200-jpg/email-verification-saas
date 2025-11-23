@@ -18,3 +18,8 @@ CELERY_BACKEND_URL=redis://localhost:6379/2
 
 BULK_INPUT_FOLDER=/tmp/bulk_inputs
 MINIO_LOCAL_PATH=/tmp/minio_fallback
+MINIO_ENDPOINT=minio:9000
+MINIO_ROOT_USER=minioadmin
+MINIO_ROOT_PASSWORD=minioadmin
+MINIO_BUCKET=email-saas
+MINIO_SECURE=False
