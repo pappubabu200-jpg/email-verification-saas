@@ -207,7 +207,61 @@ def process_bulk_task(self, job_id: str, estimated_cost: float = 0.0):
         except Exception:
             logger.exception("reservation finalize failed for job %s", job.job_id)
 
-        return {"job_id": job.job_id, "processed": processed, "valid": valid, "invalid": invalid}
+     # -------------------------------------------------
+# 📌 FINAL BILLING STEP: Capture or Refund Credits
+# -------------------------------------------------
+from backend.app.models.credit_reservation import CreditReservation
+from backend.app.services.credits_service import (
+    capture_reservation_and_charge,
+    release_reservation,
+    add_credits
+)
+
+try:
+    # Find all reservations tied to this job
+    reservations = db.query(CreditReservation).filter(
+        CreditReservation.job_id == job.job_id,
+        CreditReservation.locked == True
+    ).all()
+
+    cost_per = Decimal(str(get_cost_for_key("verify.bulk_per_email") or 0))
+    actual_cost = (cost_per * Decimal(processed)).quantize(Decimal("0.000001"))
+
+    # total reserved amount from all reservations
+    total_reserved = sum([Decimal(str(r.amount)) for r in reservations])
+
+    # We need to charge `actual_cost`
+    remaining_to_charge = actual_cost
+
+    for r in reservations:
+        if remaining_to_charge <= 0:
+            # release reservation (unused)
+            release_reservation(db, r.id)
+            continue
+
+        if Decimal(str(r.amount)) <= remaining_to_charge:
+            # capture full reservation
+            capture_reservation_and_charge(
+                db,
+                r.id,
+                type_="bulk.charge",
+                reference=f"bulk_charge:{job.job_id}"
+            )
+            remaining_to_charge -= Decimal(str(r.amount))
+        else:
+            # capture partially, refund the rest
+            capture_reservation_and_charge(
+                db,
+                r.id,
+                type_="bulk.charge",
+                reference=f"bulk_charge:{job.job_id}"
+            )
+            extra = Decimal(str(r.amount)) - remaining_to_charge
+            # refund excess
+            add_credits(job.user_id, extra, reference=f"bulk_refund:{job.job_id}")
+            remaining_to_charge = Decimal("0")
+except Exception as e:
+    logger.exception("final reservation settle failed for job %s", job.job_id)   return {"job_id": job.job_id, "processed": processed, "valid": valid, "invalid": invalid}
 
     except Exception as exc:
         logger.exception("unexpected worker failure: %s", exc)
