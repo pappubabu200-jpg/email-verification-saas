@@ -15,3 +15,5 @@ class User(Base, IdMixin, TimestampMixin):
     credits = Column(Numeric(18, 6), nullable=False, server_default="0")  # user credit balance
 
     stripe_customer_id = Column(String(255), nullable=True)
+stripe_customer_id = Column(String(255), nullable=True)
+
