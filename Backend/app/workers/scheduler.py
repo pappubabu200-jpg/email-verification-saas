@@ -54,3 +54,14 @@ def cleanup_expired_reservations():
     finally:
         db.close()
 
+from celery.schedules import crontab
+
+celery_app.conf.beat_schedule.update({
+    "bill-overages-monthly": {
+        "task": "billing.monthly_overage_task",
+        "schedule": crontab(hour=0, minute=0, day_of_month="1")
+    }
+})
+
+
+
