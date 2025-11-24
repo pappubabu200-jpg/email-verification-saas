@@ -22,6 +22,7 @@ class User(Base, IdMixin, TimestampMixin):
     - credits
     - team membership
     - auditing
+    - bulk verification jobs
     """
 
     __tablename__ = "users"
@@ -112,6 +113,13 @@ class User(Base, IdMixin, TimestampMixin):
         cascade="all, delete-orphan"
     )
 
+    # Bulk verification jobs (CSV uploads)
+    bulk_jobs = relationship(
+        "BulkJob",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+
     # Team relationship (if user is part of a team)
     teams = relationship(
         "TeamMember",
@@ -124,6 +132,4 @@ class User(Base, IdMixin, TimestampMixin):
     )
 
     def __repr__(self):
-        return f"<User id={self.id} email='{self.email}' active={self.is_active}>"
-        
-        
+        return f"<User id={self.id} email='{self.email}' active={self.is_active}>"        
