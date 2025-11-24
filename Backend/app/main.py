@@ -211,3 +211,12 @@ app.include_router(subscription_events.router)
 app.include_router(bulk_download.router)
 app.include_router(system.router)
 
+
+@app.on_event("startup")
+def startup():
+    try:
+        from backend.app.services.plan_service import seed_default_plans
+        seed_default_plans()
+    except Exception:
+        pass
+
