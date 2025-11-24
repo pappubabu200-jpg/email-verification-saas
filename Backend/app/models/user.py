@@ -132,6 +132,8 @@ class User(Base, IdMixin, TimestampMixin):
     back_populates="user",
     cascade="all, delete-orphan"
     )
+    # subscription relationship 
+    subscriptions = relationship("Subscription", back_populates="user")
 
     __table_args__ = (
         Index("idx_user_email_active", "email", "is_active"),
