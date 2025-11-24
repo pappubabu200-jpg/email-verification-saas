@@ -1,4 +1,3 @@
-
 from sqlalchemy import (
     Column,
     Integer,
@@ -12,7 +11,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 
 from backend.app.db import Base
-from backend.app.models.base import IdMixin, TimestampMixin
+    from backend.app.models.base import IdMixin, TimestampMixin
 
 
 class Team(Base, IdMixin, TimestampMixin):
@@ -70,7 +69,7 @@ class Team(Base, IdMixin, TimestampMixin):
     # Team owner (User)
     owner = relationship("User", back_populates="teams")
 
-    # Members list
+    # Team members
     members = relationship(
         "TeamMember",
         back_populates="team",
@@ -91,12 +90,19 @@ class Team(Base, IdMixin, TimestampMixin):
         cascade="all, delete-orphan"
     )
 
-    # Team balance table (if your schema uses it)
+    # Team balance (single record)
     balance = relationship(
         "TeamBalance",
         back_populates="team",
         cascade="all, delete-orphan",
-        uselist=False  # single balance record
+        uselist=False
+    )
+
+    # Bulk verification jobs (team-wide)
+    bulk_jobs = relationship(
+        "BulkJob",
+        back_populates="team",
+        cascade="all, delete-orphan"
     )
 
     __table_args__ = (
