@@ -1,96 +1,72 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Boolean
-from sqlalchemy.orm import relationship
+from sqlalchemy import (
+    Integer,
+    String,
+    Boolean,
+    ForeignKey,
+    DateTime
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql import func
+
 from backend.app.db import Base
 from backend.app.models.base import IdMixin, TimestampMixin
 
-# Supported roles
+
 TEAM_ROLES = ("owner", "admin", "member", "viewer")
 
+
 class TeamMember(Base, IdMixin, TimestampMixin):
+    """
+    Represents membership of a user inside a team.
+    Supports:
+    - roles (owner/admin/member/viewer)
+    - invitations
+    - join timestamps
+    - active/inactive state
+    """
+
     __tablename__ = "team_members"
 
-    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    role = Column(String(50), default="member")
-    invited = Column(Boolean, default=False)
+    # --------------------------------------
+    # Foreign Keys
+    # --------------------------------------
+    team_id: Mapped[int] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False
+    )
 
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False
+    )
+
+    # --------------------------------------
+    # Member Data
+    # --------------------------------------
+    role: Mapped[str] = mapped_column(
+        String(50),
+        default="member",
+        nullable=False
+    )  # must be one of TEAM_ROLES
+
+    invited: Mapped[bool] = mapped_column(Boolean, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    joined_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now()
+    )
+
+    # --------------------------------------
+    # Relationships
+    # --------------------------------------
     team = relationship("Team", back_populates="members")
+    user = relationship("User", back_populates="teams")
 
-# backend/app/models/team_member.py
-from sqlalchemy import Column, Integer, String, ForeignKey, Boolean
-from backend.app.db import Base
-from backend.app.models.base import IdMixin, TimestampMixin
-
-class TeamMember(Base, IdMixin, TimestampMixin):
-    __tablename__ = "team_members"
-    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    role = Column(String(50), default="member")  # owner|admin|member
-    is_active = Column(Boolean, default=True)
-
-from sqlalchemy import Column, Integer, String, ForeignKey
-from backend.app.db import Base
-from backend.app.models.base import IdMixin, TimestampMixin
-
-class TeamMember(Base, IdMixin, TimestampMixin):
-    __tablename__ = "team_members"
-    team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    role = Column(String(50), default="member", nullable=False)
-
-# backend/app/models/team_member.py
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
-from sqlalchemy.sql import func
-from sqlalchemy.orm import relationship
-from backend.app.db import Base
-from backend.app.models.base import IdMixin
-
-class TeamMember(Base, IdMixin):
-    __tablename__ = "team_members"
-
-    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    role = Column(String(50), nullable=True)
-    joined_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    team = relationship("Team", back_populates="members", viewonly=True)
-from sqlalchemy import Column, Integer, String, ForeignKey
-from backend.app.db import Base
-from backend.app.models.base import IdMixin, TimestampMixin
-
-class TeamMember(Base, IdMixin, TimestampMixin):
-    __tablename__ = "team_members"
-
-    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    role = Column(String(50), default="member")
-
-
-# backend/app/models/team_member.py
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey
-from backend.app.db import Base
-from app.models.base import IdMixin, TimestampMixin  # adjust import if needed
-
-class TeamMember(Base, IdMixin, TimestampMixin):
-    __tablename__ = "team_members"
-
-    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    role = Column(String(50), default="member")  # owner/admin/member
-    can_billing = Column(Boolean, default=False)
-    active = Column(Boolean, default=True)
-# backend/app/models/team_member.py
-from sqlalchemy import Column, Integer, String, ForeignKey, Boolean
-from backend.app.db import Base
-from backend.app.models.base import IdMixin, TimestampMixin
-from sqlalchemy.orm import relationship
-
-class TeamMember(Base, IdMixin, TimestampMixin):
-    __tablename__ = "team_members"
-    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    role = Column(String(50), default="member")  # owner/member/admin
-    active = Column(Boolean, default=True)
-
-    team = relationship("Team", back_populates="members")
-
+    def __repr__(self):
+        return (
+            f"<TeamMember id={self.id} team={self.team_id} "
+            f"user={self.user_id} role={self.role} active={self.active}>"
+        )
