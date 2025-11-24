@@ -227,6 +227,86 @@ def get_object_bytes(object_name: str) -> bytes:
     with open(path, "rb") as fh:
         return fh.read()
 
+# backend/app/services/minio_client.py
+"""
+MinIO helper wrapper using 'minio' package.
 
+Install dependency:
+    pip install minio
+
+Provides:
+ - client: Minio client instance
+ - MINIO_BUCKET: default bucket name from settings
+ - ensure_bucket() -> creates bucket if missing
+ - put_bytes(path, bytes, content_type=None) -> returns object path
+ - get_object_bytes(path) -> returns bytes
+ - presign_get(bucket, object_name, expires=3600) -> returns presigned URL
+"""
+
+from minio import Minio
+from minio.error import S3Error
+from backend.app.config import settings
+import io, logging
+
+logger = logging.getLogger(__name__)
+
+MINIO_ENDPOINT = getattr(settings, "MINIO_ENDPOINT", "minio:9000")
+MINIO_ACCESS_KEY = getattr(settings, "MINIO_ROOT_USER", getattr(settings, "MINIO_ACCESS_KEY", "minioadmin"))
+MINIO_SECRET_KEY = getattr(settings, "MINIO_ROOT_PASSWORD", getattr(settings, "MINIO_SECRET_KEY", "minioadmin"))
+MINIO_BUCKET = getattr(settings, "MINIO_BUCKET", "app-uploads")
+
+# Create MinIO client
+client = Minio(
+    MINIO_ENDPOINT,
+    access_key=MINIO_ACCESS_KEY,
+    secret_key=MINIO_SECRET_KEY,
+    secure=str(getattr(settings, "MINIO_SECURE", "false")).lower() in ("1", "true", "yes")
+)
+
+def ensure_bucket(bucket_name: str = None):
+    b = bucket_name or MINIO_BUCKET
+    try:
+        found = client.bucket_exists(b)
+        if not found:
+            client.make_bucket(b)
+    except Exception as e:
+        logger.exception("ensure_bucket failed: %s", e)
+        raise
+
+def put_bytes(object_name: str, data: bytes, content_type: str = "application/octet-stream", bucket: str = None):
+    """
+    Upload bytes to MinIO. object_name is path like 'inputs/abc.csv'
+    Returns s3://bucket/object_name
+    """
+    b = bucket or MINIO_BUCKET
+    ensure_bucket(b)
+    try:
+        client.put_object(b, object_name, io.BytesIO(data), length=len(data), content_type=content_type)
+        return f"s3://{b}/{object_name}"
+    except Exception:
+        logger.exception("put_bytes failed")
+        raise
+
+def get_object_bytes(object_name: str, bucket: str = None) -> bytes:
+    b = bucket or MINIO_BUCKET
+    try:
+        resp = client.get_object(b, object_name)
+        data = resp.read()
+        resp.close()
+        resp.release_conn()
+        return data
+    except Exception:
+        logger.exception("get_object_bytes failed")
+        raise
+
+def presign_get(bucket: str, object_name: str, expires: int = 3600) -> str:
+    """
+    Return presigned GET URL for object. expires in seconds (int).
+    """
+    try:
+        return client.presigned_get_object(bucket, object_name, expires=expires)
+    except Exception:
+        logger.exception("presign_get failed")
+        raise
 
 
