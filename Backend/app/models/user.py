@@ -1,6 +1,4 @@
 from sqlalchemy import (
-    Column,
-    Integer,
     String,
     Boolean,
     Numeric,
@@ -23,6 +21,8 @@ class User(Base, IdMixin, TimestampMixin):
     - team membership
     - auditing
     - bulk verification jobs
+    - extractor jobs
+    - decision makers
     """
 
     __tablename__ = "users"
@@ -70,30 +70,35 @@ class User(Base, IdMixin, TimestampMixin):
     # Relationships
     # -----------------------------
 
+    # API Keys
     api_keys = relationship(
         "ApiKey",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
+    # User’s audit logs
     audit_logs = relationship(
         "AuditLog",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
+    # User’s subscriptions
     subscriptions = relationship(
         "Subscription",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
+    # Usage logs (verification events)
     usage_logs = relationship(
         "UsageLog",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
+    # Credit transactions (debits/credits)
     credit_transactions = relationship(
         "CreditTransaction",
         back_populates="user",
@@ -114,26 +119,26 @@ class User(Base, IdMixin, TimestampMixin):
         cascade="all, delete-orphan"
     )
 
-    # Credit reservations (added earlier)
+    # Credit reservations
     credit_reservations = relationship(
         "CreditReservation",
         back_populates="user",
         cascade="all, delete-orphan"
     )
-     # Decision makers
+
+    # Decision makers (Apollo/PDL/Grok data)
     decision_makers = relationship(
-    "DecisionMaker",
-    back_populates="user",
-    cascade="all, delete-orphan"
+        "DecisionMaker",
+        back_populates="user",
+        cascade="all, delete-orphan"
     )
-    # Extractor jobs
+
+    # Extractor jobs (data extraction engine)
     extractor_jobs = relationship(
-    "ExtractorJob",
-    back_populates="user",
-    cascade="all, delete-orphan"
+        "ExtractorJob",
+        back_populates="user",
+        cascade="all, delete-orphan"
     )
-    # subscription relationship 
-    subscriptions = relationship("Subscription", back_populates="user")
 
     __table_args__ = (
         Index("idx_user_email_active", "email", "is_active"),
