@@ -1,31 +1,130 @@
+from sqlalchemy import (
+    Integer,
+    String,
+    Boolean,
+    Numeric,
+    DateTime,
+    ForeignKey,
+    Text,
+    Index,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from sqlalchemy import Column, Integer, String, Boolean, Numeric, DateTime, ForeignKey
-from sqlalchemy.sql import func
 from backend.app.db import Base
 from backend.app.models.base import IdMixin, TimestampMixin
 
+
 class Subscription(Base, IdMixin, TimestampMixin):
+    """
+    User subscription tied to Stripe Billing.
+    Stores:
+    - stripe_subscription_id
+    - plan_id (internal plan)
+    - billing cycle
+    - renewal period
+    - cancellation
+    - raw webhook payloads
+    """
+
     __tablename__ = "subscriptions"
 
+    # ----------------------------------------
     # Stripe Identifiers
-    stripe_subscription_id = Column(String(255), unique=True, index=True, nullable=False)
-    stripe_customer_id = Column(String(255), index=True, nullable=False)
+    # ----------------------------------------
+    stripe_subscription_id: Mapped[str] = mapped_column(
+        String(255),
+        unique=True,
+        index=True,
+        nullable=False
+    )
 
-    # Link to User
-    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    stripe_customer_id: Mapped[str] = mapped_column(
+        String(255),
+        index=True,
+        nullable=False
+    )
 
-    # Pricing / Plan
-    plan_name = Column(String(100), nullable=True)   # maps to your internal plan
-    price_amount = Column(Numeric(10, 2), nullable=True)  # price in USD
-    price_interval = Column(String(20), default="month")  # month/year
+    stripe_price_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True
+    )
 
-    # Status
-    status = Column(String(50), nullable=False, index=True)
-    cancel_at_period_end = Column(Boolean, default=False)
+    stripe_product_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True
+    )
 
-    # Dates
-    current_period_start = Column(DateTime(timezone=True))
-    current_period_end = Column(DateTime(timezone=True))
+    # ----------------------------------------
+    # Ownership
+    # ----------------------------------------
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False
+    )
 
-    # Raw webhook payload for debugging
-    raw = Column(String)
+    user = relationship("User", back_populates="subscriptions")
+
+    # ----------------------------------------
+    # Plan Link (INTERNAL PLAN SYSTEM)
+    # ----------------------------------------
+    plan_id: Mapped[int | None] = mapped_column(
+        ForeignKey("plans.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True
+    )
+
+    plan = relationship("Plan", back_populates="subscriptions")
+
+    # ----------------------------------------
+    # Billing Details
+    # ----------------------------------------
+    price_amount: Mapped[float | None] = mapped_column(
+        Numeric(10, 2),
+        nullable=True
+    )  # USD
+
+    price_interval: Mapped[str] = mapped_column(
+        String(20),
+        default="month"
+    )  # month or year
+
+    status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        index=True
+    )
+    # active, canceled, incomplete, past_due, trialing
+
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # ----------------------------------------
+    # Renewal Dates
+    # ----------------------------------------
+    current_period_start: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    current_period_end: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    canceled_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    # ----------------------------------------
+    # Raw Stripe Webhook Data (Optional)
+    # ----------------------------------------
+    raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_subscription_user_status", "user_id", "status"),
+        Index("idx_subscription_plan_status", "plan_id", "status"),
+    )
+
+    def __repr__(self):
+        return (
+            f"<Subscription id={self.id} user={self.user_id} "
+            f"plan={self.plan_id} status={self.status}>"
+        )
