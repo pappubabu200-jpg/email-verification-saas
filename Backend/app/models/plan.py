@@ -14,7 +14,7 @@ from backend.app.models.base import IdMixin, TimestampMixin
 class Plan(Base, IdMixin, TimestampMixin):
     """
     Subscription plans for SaaS billing.
-    Examples: Free, Pro, Business, Enterprise
+    Examples: Free, Pro, Business, Enterprise.
     """
 
     __tablename__ = "plans"
@@ -68,6 +68,7 @@ class Plan(Base, IdMixin, TimestampMixin):
     # --------------------------------------
     # Relationships
     # --------------------------------------
+    # A Plan has many Subscriptions
     subscriptions = relationship(
         "Subscription",
         back_populates="plan",
