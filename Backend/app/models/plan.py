@@ -1,36 +1,82 @@
-from sqlalchemy import Column, String, Integer, Numeric, Boolean
+from sqlalchemy import (
+    String,
+    Integer,
+    Numeric,
+    Boolean,
+    Index
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from backend.app.db import Base
 from backend.app.models.base import IdMixin, TimestampMixin
 
-class Plan(Base, IdMixin, TimestampMixin):
-    __tablename__ = "plans"
-
-    name = Column(String(100), unique=True, nullable=False)
-    display_name = Column(String(200), nullable=False)
-    monthly_price_usd = Column(Numeric(10,2), default=0)
-    daily_search_limit = Column(Integer, default=0)       # 0 == unlimited
-    monthly_credit_allowance = Column(Integer, default=0) # credits included monthly
-    rate_limit_per_sec = Column(Integer, default=0)       # 0 == use global default
-    is_public = Column(Boolean, default=True)
-# backend/app/models/plan.py
-from sqlalchemy import Column, String, Integer, Numeric, Boolean
-from backend.app.db import Base
-try:
-    from backend.app.models.base import IdMixin, TimestampMixin
-except Exception:
-    # Minimal fallback if your base mixins don't exist
-    class IdMixin:
-        id = Column(Integer, primary_key=True, index=True)
-    class TimestampMixin:
-        pass
 
 class Plan(Base, IdMixin, TimestampMixin):
+    """
+    Subscription plans for SaaS billing.
+    Examples: Free, Pro, Business, Enterprise
+    """
+
     __tablename__ = "plans"
 
-    name = Column(String(100), unique=True, nullable=False)
-    display_name = Column(String(200), nullable=False)
-    monthly_price_usd = Column(Numeric(10, 2), default=0)
-    daily_search_limit = Column(Integer, default=0)       # 0 == unlimited
-    monthly_credit_allowance = Column(Integer, default=0) # credits included monthly
-    rate_limit_per_sec = Column(Integer, default=0)       # 0 == use global default
-    is_public = Column(Boolean, default=True)
+    # --------------------------------------
+    # Identifiers
+    # --------------------------------------
+    name: Mapped[str] = mapped_column(
+        String(100),
+        unique=True,
+        nullable=False,
+        index=True
+    )
+
+    display_name: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False
+    )
+
+    # --------------------------------------
+    # Pricing
+    # --------------------------------------
+    monthly_price_usd: Mapped[float] = mapped_column(
+        Numeric(10, 2),
+        default=0
+    )
+
+    # --------------------------------------
+    # Limits
+    # --------------------------------------
+    daily_search_limit: Mapped[int] = mapped_column(
+        Integer,
+        default=0
+    )  # 0 = unlimited
+
+    monthly_credit_allowance: Mapped[int] = mapped_column(
+        Integer,
+        default=0
+    )  # included credits
+
+    rate_limit_per_sec: Mapped[int] = mapped_column(
+        Integer,
+        default=0
+    )  # 0 = global default
+
+    # --------------------------------------
+    # Visibility
+    # --------------------------------------
+    is_public: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # --------------------------------------
+    # Relationships
+    # --------------------------------------
+    subscriptions = relationship(
+        "Subscription",
+        back_populates="plan",
+        cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("idx_plan_public_price", "is_public", "monthly_price_usd"),
+    )
+
+    def __repr__(self):
+        return f"<Plan id={self.id} name='{self.name}' price=${self.monthly_price_usd}>"
