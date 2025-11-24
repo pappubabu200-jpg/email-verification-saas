@@ -85,3 +85,71 @@ def clear_backoff(domain: str):
         REDIS.delete(BACKOFF_KEY.format(domain))
     except Exception:
         pass
+
+# backend/app/services/domain_backoff.py
+import time
+import threading
+
+_LOCK = threading.Lock()
+_BACKOFF = {}  # domain → {count, until_timestamp}
+
+MAX_BACKOFF_SECONDS = 600  # 10 minutes
+INITIAL_BACKOFF = 3        # seconds
+
+
+def get_backoff_seconds(domain: str) -> int:
+    if not domain:
+        return 0
+    now = time.time()
+    with _LOCK:
+        info = _BACKOFF.get(domain)
+        if not info:
+            return 0
+        if info["until"] <= now:
+            return 0
+        return int(info["until"] - now)
+
+
+def increase_backoff(domain: str):
+    if not domain:
+        return
+    now = time.time()
+    with _LOCK:
+        old = _BACKOFF.get(domain, {"count": 0, "until": now})
+        count = old["count"] + 1
+        delay = min(INITIAL_BACKOFF * count, MAX_BACKOFF_SECONDS)
+        _BACKOFF[domain] = {"count": count, "until": now + delay}
+
+
+def clear_backoff(domain: str):
+    if not domain:
+        return
+    with _LOCK:
+        if domain in _BACKOFF:
+            del _BACKOFF[domain]
+
+
+# --- Rate-slot system (SMTP concurrency limiter) ---
+
+_SLOTS = {}  # domain → current slots
+MAX_SLOTS_PER_DOMAIN = 3
+
+
+def acquire_slot(domain: str) -> bool:
+    if not domain:
+        return True
+    with _LOCK:
+        curr = _SLOTS.get(domain, 0)
+        if curr >= MAX_SLOTS_PER_DOMAIN:
+            return False
+        _SLOTS[domain] = curr + 1
+        return True
+
+
+def release_slot(domain: str):
+    if not domain:
+        return
+    with _LOCK:
+        curr = _SLOTS.get(domain, 0)
+        if curr > 0:
+            _SLOTS[domain] = curr - 1
