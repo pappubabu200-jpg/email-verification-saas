@@ -120,6 +120,12 @@ class User(Base, IdMixin, TimestampMixin):
         back_populates="user",
         cascade="all, delete-orphan"
     )
+     # Decision makers
+    decision_makers = relationship(
+    "DecisionMaker",
+    back_populates="user",
+    cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         Index("idx_user_email_active", "email", "is_active"),
