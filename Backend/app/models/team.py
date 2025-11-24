@@ -107,6 +107,12 @@ class Team(Base, IdMixin, TimestampMixin):
     back_populates="team",
     cascade="all, delete-orphan"
     )
+    # suppression 
+    suppressions = relationship(
+    "Suppression",
+    back_populates="team",
+    cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         Index("idx_team_active_owner", "owner_id", "is_active"),
