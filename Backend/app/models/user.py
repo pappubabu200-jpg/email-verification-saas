@@ -7,7 +7,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 
 from backend.app.db import Base
-from backend.app.models.base import IdMixin, TimestampMixin
+    from backend.app.models.base import IdMixin, TimestampMixin
 
 
 class User(Base, IdMixin, TimestampMixin):
@@ -63,6 +63,12 @@ class User(Base, IdMixin, TimestampMixin):
 
     stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # NEW FIELD — required for auto-topup billing system
+    default_payment_method_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True
+    )
+
     last_login_at: Mapped[str | None] = mapped_column(String(50), nullable=True)
     last_login_ip: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
@@ -70,76 +76,66 @@ class User(Base, IdMixin, TimestampMixin):
     # Relationships
     # -----------------------------
 
-    # API Keys
     api_keys = relationship(
         "ApiKey",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # User’s audit logs
     audit_logs = relationship(
         "AuditLog",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # User’s subscriptions
     subscriptions = relationship(
         "Subscription",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # Usage logs (verification events)
     usage_logs = relationship(
         "UsageLog",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # Credit transactions (debits/credits)
     credit_transactions = relationship(
         "CreditTransaction",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # Bulk verification jobs
     bulk_jobs = relationship(
         "BulkJob",
         back_populates="user",
         cascade="all, delete-orphan"
     )
-    # suppression 
+
     suppressions = relationship(
-    "Suppression",
-    back_populates="user",
-    cascade="all, delete-orphan"
+        "Suppression",
+        back_populates="user",
+        cascade="all, delete-orphan"
     )
 
-    # Team membership
     teams = relationship(
         "TeamMember",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # Credit reservations
     credit_reservations = relationship(
         "CreditReservation",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # Decision makers (Apollo/PDL/Grok data)
     decision_makers = relationship(
         "DecisionMaker",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # Extractor jobs (data extraction engine)
     extractor_jobs = relationship(
         "ExtractorJob",
         back_populates="user",
