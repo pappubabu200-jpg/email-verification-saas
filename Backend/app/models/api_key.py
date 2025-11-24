@@ -64,6 +64,11 @@ class ApiKey(Base, IdMixin, TimestampMixin):
     # ------------------------------
 
     user = relationship("User", back_populates="api_keys")
+    usage_logs = relationship(
+        "UsageLog",
+        back_populates="api_key",
+        cascade="all, delete-orphan"
+    )
 
     # ------------------------------
     # SQL constraints
