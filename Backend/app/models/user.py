@@ -111,6 +111,12 @@ class User(Base, IdMixin, TimestampMixin):
         back_populates="user",
         cascade="all, delete-orphan"
     )
+    # suppression 
+    suppressions = relationship(
+    "Suppression",
+    back_populates="user",
+    cascade="all, delete-orphan"
+    )
 
     # Team membership
     teams = relationship(
