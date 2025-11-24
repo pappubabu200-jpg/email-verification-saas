@@ -102,6 +102,11 @@ class Team(Base, IdMixin, TimestampMixin):
         back_populates="team",
         cascade="all, delete-orphan"
     )
+    extractor_jobs = relationship(
+    "ExtractorJob",
+    back_populates="team",
+    cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         Index("idx_team_active_owner", "owner_id", "is_active"),
