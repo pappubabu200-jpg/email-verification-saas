@@ -1,40 +1,107 @@
-from sqlalchemy import Column, Integer, String, Numeric, ForeignKey
+
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    Boolean,
+    ForeignKey,
+    Numeric,
+    JSON,
+    Index,
+)
+from sqlalchemy.orm import relationship, Mapped, mapped_column
+
 from backend.app.db import Base
 from backend.app.models.base import IdMixin, TimestampMixin
 
-class Team(Base, IdMixin, TimestampMixin):
-    __tablename__ = "teams"
-
-    name = Column(String(255), nullable=False)
-    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-
-    credits = Column(Numeric(18, 6), nullable=False, server_default="0")
-# backend/app/models/team.py
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Numeric
-from backend.app.db import Base
-from app.models.base import IdMixin, TimestampMixin  # adjust import if your base path differs
 
 class Team(Base, IdMixin, TimestampMixin):
+    """
+    Represents a team account.
+    - Has an owner (User)
+    - Holds shared credits
+    - Has multiple members
+    - Supports audit logs
+    - Supports billing (Stripe)
+    """
+
     __tablename__ = "teams"
 
-    name = Column(String(200), nullable=False, unique=True)
-    owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    credits = Column(Numeric(18,6), default=0)  # team credit pool
-    is_active = Column(Boolean, default=True)
+    # ------------------------------------
+    # Basic Info
+    # ------------------------------------
+    name: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        unique=True,
+        index=True
+    )
 
-# backend/app/models/team.py
-from sqlalchemy import Column, Integer, String, Text, Boolean, ForeignKey
-from backend.app.db import Base
-from backend.app.models.base import IdMixin, TimestampMixin
-from sqlalchemy.orm import relationship
+    # Owner user
+    owner_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
 
-class Team(Base, IdMixin, TimestampMixin):
-    __tablename__ = "teams"
-    name = Column(String(255), nullable=False, unique=True)
-    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    credits = Column(Integer, default=0)  # team shared credits
-    stripe_customer_id = Column(String(255), nullable=True)
-    metadata = Column(Text, nullable=True)
+    # ------------------------------------
+    # Billing & Credits
+    # ------------------------------------
+    credits: Mapped[float] = mapped_column(
+        Numeric(18, 2),
+        nullable=False,
+        server_default="0"
+    )
 
-    members = relationship("TeamMember", back_populates="team")
+    stripe_customer_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True
+    )
 
+    # Additional optional metadata
+    settings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # ------------------------------------
+    # Relationships
+    # ------------------------------------
+
+    # Team owner (User)
+    owner = relationship("User", back_populates="teams")
+
+    # Members list
+    members = relationship(
+        "TeamMember",
+        back_populates="team",
+        cascade="all, delete-orphan"
+    )
+
+    # Team audit logs
+    audit_logs = relationship(
+        "AuditLog",
+        back_populates="team",
+        cascade="all, delete-orphan"
+    )
+
+    # Team credit transactions
+    credit_transactions = relationship(
+        "TeamCreditTransaction",
+        back_populates="team",
+        cascade="all, delete-orphan"
+    )
+
+    # Team balance table (if your schema uses it)
+    balance = relationship(
+        "TeamBalance",
+        back_populates="team",
+        cascade="all, delete-orphan",
+        uselist=False  # single balance record
+    )
+
+    __table_args__ = (
+        Index("idx_team_active_owner", "owner_id", "is_active"),
+    )
+
+    def __repr__(self):
+        return f"<Team id={self.id} name='{self.name}' owner={self.owner_id}>"
