@@ -1,97 +1,129 @@
+# backend/app/services/analytics.py
+
 import logging
-from sqlalchemy import func
-from backend.app.db import SessionLocal
+from datetime import datetime, timedelta, timezone
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.app.db import async_session
 from backend.app.models.usage_log import UsageLog
-from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-def count_requests(days: int = 7):
-    db = SessionLocal()
-    try:
-        since = datetime.utcnow() - timedelta(days=days)
-        total = db.query(func.count(UsageLog.id)).filter(UsageLog.created_at >= since).scalar() or 0
-        return total
-    finally:
-        db.close()
+
+# -------------------------------------------------------------------
+# Helper: async DB session
+# -------------------------------------------------------------------
+async def get_db() -> AsyncSession:
+    async with async_session() as session:
+        yield session
 
 
-def top_api_keys(days: int = 7, limit: int = 10):
-    db = SessionLocal()
-    try:
-        since = datetime.utcnow() - timedelta(days=days)
-        rows = (
-            db.query(UsageLog.api_key_id, func.count(UsageLog.id).label("cnt"))
-            .filter(UsageLog.created_at >= since)
+# -------------------------------------------------------------------
+# 1. Total requests in last X days
+# -------------------------------------------------------------------
+async def count_requests(days: int = 7) -> int:
+    async with async_session() as db:
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+
+        result = await db.execute(
+            select(func.count(UsageLog.id)).where(UsageLog.created_at >= since)
+        )
+
+        return int(result.scalar() or 0)
+
+
+# -------------------------------------------------------------------
+# 2. Top API keys by traffic
+# -------------------------------------------------------------------
+async def top_api_keys(days: int = 7, limit: int = 10):
+    async with async_session() as db:
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+
+        result = await db.execute(
+            select(UsageLog.api_key_id, func.count(UsageLog.id).label("cnt"))
+            .where(UsageLog.created_at >= since)
             .group_by(UsageLog.api_key_id)
             .order_by(func.count(UsageLog.id).desc())
             .limit(limit)
-            .all()
         )
-        return [{"api_key_id": r[0], "count": int(r[1])} for r in rows]
-    finally:
-        db.close()
+
+        rows = result.all()
+
+        return [
+            {"api_key_id": row[0], "count": int(row[1])}
+            for row in rows
+        ]
 
 
-def top_endpoints(days: int = 7, limit: int = 10):
-    db = SessionLocal()
-    try:
-        since = datetime.utcnow() - timedelta(days=days)
-        rows = (
-            db.query(UsageLog.endpoint, func.count(UsageLog.id).label("cnt"))
-            .filter(UsageLog.created_at >= since)
+# -------------------------------------------------------------------
+# 3. Top endpoints used
+# -------------------------------------------------------------------
+async def top_endpoints(days: int = 7, limit: int = 10):
+    async with async_session() as db:
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+
+        result = await db.execute(
+            select(UsageLog.endpoint, func.count(UsageLog.id).label("cnt"))
+            .where(UsageLog.created_at >= since)
             .group_by(UsageLog.endpoint)
             .order_by(func.count(UsageLog.id).desc())
             .limit(limit)
-            .all()
         )
+
+        rows = result.all()
+
         return [{"endpoint": r[0], "count": int(r[1])} for r in rows]
-    finally:
-        db.close()
 
 
-def daily_breakdown(days: int = 30):
-    db = SessionLocal()
-    try:
+# -------------------------------------------------------------------
+# 4. Daily traffic breakdown
+# -------------------------------------------------------------------
+async def daily_breakdown(days: int = 30):
+    async with async_session() as db:
         results = []
+
         for i in range(days):
-            d = datetime.utcnow().date() - timedelta(days=i)
-            start = datetime(d.year, d.month, d.day)
+            day = datetime.now(timezone.utc).date() - timedelta(days=i)
+            start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
             end = start + timedelta(days=1)
 
-            count = (
-                db.query(func.count(UsageLog.id))
-                .filter(UsageLog.created_at >= start, UsageLog.created_at < end)
-                .scalar()
-                or 0
+            count_res = await db.execute(
+                select(func.count(UsageLog.id))
+                .where(UsageLog.created_at >= start)
+                .where(UsageLog.created_at < end)
             )
-            results.append({"date": start.strftime("%Y-%m-%d"), "count": int(count)})
+
+            count = int(count_res.scalar() or 0)
+            results.append({"date": start.strftime("%Y-%m-%d"), "count": count})
 
         return list(reversed(results))
-    finally:
-        db.close()
 
 
-def error_rate(days: int = 7):
-    db = SessionLocal()
-    try:
-        since = datetime.utcnow() - timedelta(days=days)
+# -------------------------------------------------------------------
+# 5. Error rate calculation
+# -------------------------------------------------------------------
+async def error_rate(days: int = 7):
+    async with async_session() as db:
+        since = datetime.now(timezone.utc) - timedelta(days=days)
 
-        total = (
-            db.query(func.count(UsageLog.id))
-            .filter(UsageLog.created_at >= since)
-            .scalar()
-            or 0
+        total_res = await db.execute(
+            select(func.count(UsageLog.id)).where(UsageLog.created_at >= since)
         )
+        total = int(total_res.scalar() or 0)
 
-        errors = (
-            db.query(func.count(UsageLog.id))
-            .filter(UsageLog.created_at >= since, UsageLog.status_code >= 400)
-            .scalar()
-            or 0
+        error_res = await db.execute(
+            select(func.count(UsageLog.id)).where(
+                UsageLog.created_at >= since,
+                UsageLog.status_code >= 400
+            )
         )
+        errors = int(error_res.scalar() or 0)
 
         rate = (errors / total * 100) if total > 0 else 0.0
-        return {"total": total, "errors": errors, "error_rate_percent": round(rate, 2)}
-    finally:
-        db.close()
+
+        return {
+            "total": total,
+            "errors": errors,
+            "error_rate_percent": round(rate, 2)
+        }
