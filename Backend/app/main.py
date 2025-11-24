@@ -228,3 +228,50 @@ app.include_router(subscription_events.router)
 app.include_router(bulk_download.router)
 app.include_router(system.router)
 
+# ---------------------------------------------------------
+# STARTUP HOOK: Seed plans, ensure MinIO bucket, auto-migrate
+# ---------------------------------------------------------
+from fastapi import FastAPI
+from backend.app.services.plan_service import seed_default_plans
+from backend.app.services.minio_client import ensure_bucket, MINIO_BUCKET
+import subprocess, os, logging
+
+logger = logging.getLogger(__name__)
+
+@app.on_event("startup")
+def startup_event():
+    # 1) Seed Plans (safe, idempotent)
+    try:
+        seed_default_plans()
+        logger.info("✔ Default plans seeded")
+    except Exception as e:
+        logger.error(f"Failed to seed plans: {e}")
+
+    # 2) Ensure MinIO bucket exists
+    try:
+        ensure_bucket(MINIO_BUCKET)
+        logger.info(f"✔ MinIO bucket ensured: {MINIO_BUCKET}")
+    except Exception as e:
+        logger.error(f"Failed ensuring MinIO bucket: {e}")
+
+    # 3) OPTIONAL: Create one-time admin user if missing
+    try:
+        from backend.app.db import SessionLocal
+        from backend.app.models.user import User
+        db = SessionLocal()
+        admin = db.query(User).filter(User.email == "admin@system.local").first()
+        if not admin:
+            u = User(email="admin@system.local", hashed_password="admin123", is_admin=True)
+            db.add(u)
+            db.commit()
+            logger.info("✔ Admin user created: admin@system.local / admin123")
+    except Exception as e:
+        logger.error(f"Admin creation failed: {e}")
+
+    # 4) Run DB migrations automatically (safe)
+    try:
+        if os.environ.get("RUN_MIGRATIONS", "1") == "1":
+            subprocess.run(["alembic", "upgrade", "head"], check=False)
+            logger.info("✔ Alembic migrations applied automatically")
+    except Exception as e:
+        logger.error(f"Alembic migration error: {e}")
