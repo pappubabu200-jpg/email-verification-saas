@@ -220,3 +220,11 @@ def startup():
     except Exception:
         pass
 
+from backend.app.api.v1 import plans, pricing, usage_user, subscription_events, bulk_download, system
+app.include_router(plans.router)
+app.include_router(pricing.router)
+app.include_router(usage_user.router)
+app.include_router(subscription_events.router)
+app.include_router(bulk_download.router)
+app.include_router(system.router)
+
