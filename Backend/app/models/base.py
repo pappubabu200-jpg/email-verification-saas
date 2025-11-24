@@ -1,12 +1,35 @@
+from datetime import datetime
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import Integer, DateTime, func
 
-from sqlalchemy import Column, Integer, DateTime
-from sqlalchemy.sql import func
-from backend.app.db import Base as _Base
 
-# Provide convenient mixins for models
 class IdMixin:
-    id = Column(Integer, primary_key=True, index=True)
+    """
+    Adds an auto-increment primary key ID to a model.
+    """
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+        index=True
+    )
+
 
 class TimestampMixin:
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    """
+    Adds created_at and updated_at timestamps.
+    - created_at: set on insert
+    - updated_at: updated automatically on update
+    """
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        server_onupdate=func.now(),
+        nullable=False
+    )
