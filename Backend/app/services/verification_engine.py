@@ -1,17 +1,24 @@
+# backend/app/services/verification_engine.py
 
 import json
 import logging
-import time
+import asyncio
+from typing import Any, Dict
 
-from backend.app.models.verification_result import VerificationResult
 from backend.app.db import SessionLocal
+from backend.app.models.verification_result import VerificationResult
+
+from backend.app.services.cache import get_cached, set_cached
 from backend.app.services.mx_lookup import choose_mx_for_domain
 from backend.app.services.smtp_probe import smtp_probe
-from backend.app.services.cache import get_cached, set_cached
-from backend.app.services.domain_throttle import acquire, release
 from backend.app.services.verification_score import score_verification
-
-# NEW imports for deliverability engine
+from backend.app.services.domain_backoff import (
+    get_backoff_seconds,
+    increase_backoff,
+    clear_backoff,
+    acquire_slot,
+    release_slot,
+)
 from backend.app.services.deliverability_monitor import (
     record_domain_result,
     compute_domain_score,
@@ -20,30 +27,31 @@ from backend.app.services.deliverability_monitor import (
 logger = logging.getLogger(__name__)
 
 
-def verify_email_sync(email: str, user_id: int = None):
+# ---------------------------------------------------------
+# ASYNC ENGINE
+# ---------------------------------------------------------
+
+async def verify_email_async(email: str, user_id: int | None = None) -> Dict[str, Any]:
     """
-    100% production version.
-    Includes:
+    Full async verification pipeline:
     - cache
-    - throttling
-    - smtp_probe
+    - MX lookup
+    - SMTP handshake
     - scoring
-    - persistence
     - deliverability tracking
+    - persistence
     """
-    # -------- CACHE CHECK --------
+    # ---------- CACHE ----------
     cached = get_cached(email)
     if cached:
-        # also record historical: treat valid as "good"
         domain = email.split("@")[-1].lower()
         try:
-            success = cached.get("status") == "valid"
-            record_domain_result(domain, success)
+            record_domain_result(domain, cached.get("status") == "valid")
         except Exception:
             pass
         return cached
 
-    # -------- DOMAIN + MX --------
+    # ---------- FORMAT CHECK ----------
     if "@" not in email:
         result = {"email": email, "status": "invalid", "reason": "no_at_symbol"}
         set_cached(email, result)
@@ -52,6 +60,7 @@ def verify_email_sync(email: str, user_id: int = None):
     local, domain = email.split("@", 1)
     domain = domain.lower()
 
+    # ---------- MX LOOKUP ----------
     mx_hosts = choose_mx_for_domain(domain)
     if not mx_hosts:
         result = {"email": email, "status": "invalid", "reason": "no_mx"}
@@ -59,31 +68,47 @@ def verify_email_sync(email: str, user_id: int = None):
         record_domain_result(domain, False)
         return result
 
-    # -------- SMTP PROBE --------
-    probe = smtp_probe(email, mx_hosts)
+    # ---------- RESPECT BACKOFF ----------
+    backoff_sec = get_backoff_seconds(domain)
+    if backoff_sec > 0:
+        await asyncio.sleep(min(backoff_sec, 8))
 
-    # -------- SCORING --------
-    scored = score_verification(probe)  # returns {status, risk_score, details}
+    # ---------- DOMAIN SLOT (concurrency limiter) ----------
+    slot_ok = acquire_slot(domain)
+    if not slot_ok:
+        result = {"email": email, "status": "unknown", "reason": "domain_slots_full"}
+        return result
 
-    # -------- DELIVERABILITY RECORDING --------
+    # ---------- SMTP PROBE ----------
     try:
-        success = scored.get("status") == "valid"
-        record_domain_result(domain, success)
+        smtp_res = await smtp_probe(email, domain, mx_hosts)
     except Exception as e:
-        logger.debug("deliverability record failed: %s", e)
+        logger.exception("smtp probe failed: %s", e)
+        smtp_res = {"status": "error", "exception": str(e)}
+        increase_backoff(domain)
+    finally:
+        release_slot(domain)
 
-    # -------- OPTIONAL: DOMAIN SCORE PRE-COMPUTE --------
+    # ---------- SCORING ----------
+    scored = score_verification(smtp_res)
+
+    # ---------- DELIVERABILITY TRACKING ----------
     try:
-        mx_used = probe.get("mx_host")
-        domain_rep = compute_domain_score(domain, mx_used)
-        scored["domain_reputation"] = domain_rep
+        record_domain_result(domain, scored.get("status") == "valid")
+    except Exception:
+        pass
+
+    # ---------- DOMAIN REPUTATION ----------
+    try:
+        mx_used = smtp_res.get("mx_host")
+        scored["domain_reputation"] = compute_domain_score(domain, mx_used)
     except Exception:
         scored["domain_reputation"] = None
 
-    # -------- CACHE STORE --------
+    # ---------- CACHE SAVE ----------
     set_cached(email, scored)
 
-    # -------- PERSIST IN DATABASE --------
+    # ---------- DB SAVE ----------
     db = SessionLocal()
     try:
         vr = VerificationResult(
@@ -103,3 +128,14 @@ def verify_email_sync(email: str, user_id: int = None):
         db.close()
 
     return scored
+
+
+# ---------------------------------------------------------
+# SYNC WRAPPER
+# ---------------------------------------------------------
+
+def verify_email_sync(email: str, user_id: int = None) -> Dict[str, Any]:
+    """
+    Sync wrapper so routers & bulk processor can call easily.
+    """
+    return asyncio.run(verify_email_async(email, user_id))
