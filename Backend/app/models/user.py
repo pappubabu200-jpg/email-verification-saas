@@ -126,6 +126,12 @@ class User(Base, IdMixin, TimestampMixin):
     back_populates="user",
     cascade="all, delete-orphan"
     )
+    # Extractor jobs
+    extractor_jobs = relationship(
+    "ExtractorJob",
+    back_populates="user",
+    cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         Index("idx_user_email_active", "email", "is_active"),
