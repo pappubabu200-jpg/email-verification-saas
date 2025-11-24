@@ -1,38 +1,77 @@
-from sqlalchemy import Column, Integer, Numeric, String, Text, ForeignKey
+from sqlalchemy import (
+    Integer,
+    Numeric,
+    String,
+    Text,
+    ForeignKey,
+    Index
+)
+from sqlalchemy.orm import relationship, Mapped, mapped_column
+
 from backend.app.db import Base
 from backend.app.models.base import IdMixin, TimestampMixin
 
-# A record of credit topups and charges (amount positive = topup, negative = charge)
+
 class CreditTransaction(Base, IdMixin, TimestampMixin):
+    """
+    Record of credit usage:
+    - amount positive = topup
+    - amount negative = charge
+    - supports both user and team billing
+    """
+
     __tablename__ = "credit_transactions"
 
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    amount = Column(Numeric(18, 6), nullable=False)  # allow fractional credits if needed
-    balance_after = Column(Numeric(18, 6), nullable=False)
-    type = Column(String(50), nullable=False)  # e.g., "topup", "charge", "refund"
-    reference = Column(String(255), nullable=True)
-    metadata = Column(Text, nullable=True)
+    # --------------------------------------
+    # Ownership
+    # --------------------------------------
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True
+    )
+
+    team_id: Mapped[int | None] = mapped_column(
+        ForeignKey("teams.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True
+    )
+
+    user = relationship("User", back_populates="credit_transactions")
+    team = relationship("Team", back_populates="credit_transactions")
+
+    # --------------------------------------
+    # Transaction details
+    # --------------------------------------
+    amount: Mapped[float] = mapped_column(
+        Numeric(18, 6),
+        nullable=False
+    )
+
+    balance_after: Mapped[float] = mapped_column(
+        Numeric(18, 6),
+        nullable=False
+    )
+
+    type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False
+    )  
+    # examples: "topup", "charge", "refund", "bulk_job", "api_call"
+
+    reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # avoid "metadata" keyword → replace with "details"
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_credit_txn_user_type", "user_id", "type"),
+        Index("idx_credit_txn_team_type", "team_id", "type"),
+    )
 
     def __repr__(self):
-        return f"<CreditTransaction id={self.id} user={self.user_id} amount={self.amount} balance_after={self.balance_after}>"
-# backend/app/models/credit_transaction.py
-
-from sqlalchemy import Column, Integer, Numeric, String, DateTime, ForeignKey
-from sqlalchemy.sql import func
-from backend.app.db import Base
-
-class CreditTransaction(Base):
-    __tablename__ = "credit_transactions"
-
-    id = Column(Integer, primary_key=True)
-    
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)  # NEW FIELD
-
-    amount = Column(Numeric(18, 6), nullable=False)
-    balance_after = Column(Numeric(18, 6), nullable=False)
-    type = Column(String(50), nullable=False)  # credit, debit
-    reference = Column(String(255), nullable=True)
-    metadata = Column(String(500), nullable=True)
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+        return (
+            f"<CreditTransaction id={self.id} "
+            f"user={self.user_id} team={self.team_id} "
+            f"amount={self.amount} balance_after={self.balance_after}>"
+        )
