@@ -34,9 +34,7 @@ class User(Base, IdMixin, TimestampMixin):
         String(255), unique=True, index=True, nullable=False
     )
 
-    hashed_password: Mapped[str] = mapped_column(
-        String(255), nullable=False
-    )
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -55,7 +53,7 @@ class User(Base, IdMixin, TimestampMixin):
     # -----------------------------
     plan: Mapped[str | None] = mapped_column(
         String(100), index=True, nullable=True
-    )  # free / pro / enterprise
+    )
 
     credits: Mapped[float] = mapped_column(
         Numeric(18, 2),
@@ -63,66 +61,62 @@ class User(Base, IdMixin, TimestampMixin):
         server_default="0"
     )
 
-    stripe_customer_id: Mapped[str | None] = mapped_column(
-        String(255), nullable=True
-    )
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    last_login_at: Mapped[str | None] = mapped_column(
-        String(50), nullable=True
-    )
-    last_login_ip: Mapped[str | None] = mapped_column(
-        String(50), nullable=True
-    )
+    last_login_at: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    last_login_ip: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     # -----------------------------
     # Relationships
     # -----------------------------
 
-    # API Keys
     api_keys = relationship(
         "ApiKey",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # User’s audit logs
     audit_logs = relationship(
         "AuditLog",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # User’s subscription
     subscriptions = relationship(
         "Subscription",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # Usage logs (verification events)
     usage_logs = relationship(
         "UsageLog",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # Credit transactions (debits/credits)
     credit_transactions = relationship(
         "CreditTransaction",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # Bulk verification jobs (CSV uploads)
+    # Bulk verification jobs
     bulk_jobs = relationship(
         "BulkJob",
         back_populates="user",
         cascade="all, delete-orphan"
     )
 
-    # Team relationship (if user is part of a team)
+    # Team membership
     teams = relationship(
         "TeamMember",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+
+    # Credit reservations (added earlier)
+    credit_reservations = relationship(
+        "CreditReservation",
         back_populates="user",
         cascade="all, delete-orphan"
     )
@@ -132,4 +126,4 @@ class User(Base, IdMixin, TimestampMixin):
     )
 
     def __repr__(self):
-        return f"<User id={self.id} email='{self.email}' active={self.is_active}>"        
+        return f"<User id={self.id} email='{self.email}' active={self.is_active}>"
