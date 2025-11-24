@@ -1,45 +1,67 @@
 # backend/app/services/domain_backoff.py
-import time, logging
+
+import logging
+import time
 from backend.app.config import settings
+
 try:
     import redis
     REDIS = redis.from_url(settings.REDIS_URL)
 except Exception:
-    REDIS = None
+    REDIS = None  # graceful fallback
 
 logger = logging.getLogger(__name__)
 
-# Max concurrent probes per domain (default)
+# --------------------------------------------
+# CONFIG
+# --------------------------------------------
+
 DEFAULT_DOMAIN_SLOTS = int(getattr(settings, "DOMAIN_CONCURRENCY", 2))
 SLOT_TTL = int(getattr(settings, "DOMAIN_SLOT_TTL", 60))  # seconds
-BACKOFF_KEY = "domain:backoff:{}"        # domain -> backoff multiplier record
-SLOT_KEY = "domain:slots:{}"             # domain -> integer
+BACKOFF_KEY = "domain:backoff:{}"        # domain → backoff seconds
+SLOT_KEY = "domain:slots:{}"             # domain → current active slots
+
+
+# --------------------------------------------
+# DOMAIN CONCURRENCY CONTROL
+# --------------------------------------------
 
 def acquire_slot(domain: str) -> bool:
     """
-    Atomically increment slot count and enforce limit.
-    Returns True if slot granted, False if limit exceeded.
+    Redis-based concurrency limiting.
+    Allows N parallel SMTP probes per domain.
     """
     if REDIS is None:
-        return True
+        return True  # fallback: allow everything
+
     try:
         key = SLOT_KEY.format(domain)
         cur = REDIS.incr(key)
+
         if cur == 1:
             REDIS.expire(key, SLOT_TTL)
+
         max_slots = int(getattr(settings, "DOMAIN_CONCURRENCY", DEFAULT_DOMAIN_SLOTS))
+
         if cur <= max_slots:
             return True
-        # exceed -> rollback
+
+        # rejected → rollback
         REDIS.decr(key)
         return False
+
     except Exception as e:
         logger.debug("acquire_slot error: %s", e)
-        return True
+        return True  # safe fallback
+
 
 def release_slot(domain: str):
+    """
+    Release domain slot after SMTP probe.
+    """
     if REDIS is None:
         return
+
     try:
         key = SLOT_KEY.format(domain)
         cur = REDIS.decr(key)
@@ -48,108 +70,54 @@ def release_slot(domain: str):
     except Exception:
         pass
 
+
+# --------------------------------------------
+# DOMAIN BACKOFF SYSTEM
+# --------------------------------------------
+
 def get_backoff_seconds(domain: str) -> int:
     """
-    Get backoff seconds for domain. Uses a multiplier stored in Redis.
+    Read current backoff window for domain.
     """
     if REDIS is None:
         return 0
+
     try:
-        k = BACKOFF_KEY.format(domain)
-        v = REDIS.get(k)
+        v = REDIS.get(BACKOFF_KEY.format(domain))
         if not v:
             return 0
         return int(v)
     except Exception:
         return 0
 
+
 def increase_backoff(domain: str, base: int = 5, cap: int = 300):
     """
-    Increase multiplier (exponential-ish).
+    Exponential backoff:
+    Increase domain wait time on temp errors (4xx)
     """
     if REDIS is None:
         return
+
     try:
-        k = BACKOFF_KEY.format(domain)
-        cur = REDIS.incr(k)
-        # set TTL so backoff decays after some time
-        ttl = min(cap, base * (2 ** (int(cur)-1)))
-        REDIS.expire(k, ttl)
+        key = BACKOFF_KEY.format(domain)
+        cur = REDIS.incr(key)
+
+        ttl = min(cap, base * (2 ** (int(cur) - 1)))
+        REDIS.expire(key, ttl)
+
     except Exception:
         pass
 
+
 def clear_backoff(domain: str):
+    """
+    Remove domain backoff entirely.
+    """
     if REDIS is None:
         return
+
     try:
         REDIS.delete(BACKOFF_KEY.format(domain))
     except Exception:
         pass
-
-# backend/app/services/domain_backoff.py
-import time
-import threading
-
-_LOCK = threading.Lock()
-_BACKOFF = {}  # domain → {count, until_timestamp}
-
-MAX_BACKOFF_SECONDS = 600  # 10 minutes
-INITIAL_BACKOFF = 3        # seconds
-
-
-def get_backoff_seconds(domain: str) -> int:
-    if not domain:
-        return 0
-    now = time.time()
-    with _LOCK:
-        info = _BACKOFF.get(domain)
-        if not info:
-            return 0
-        if info["until"] <= now:
-            return 0
-        return int(info["until"] - now)
-
-
-def increase_backoff(domain: str):
-    if not domain:
-        return
-    now = time.time()
-    with _LOCK:
-        old = _BACKOFF.get(domain, {"count": 0, "until": now})
-        count = old["count"] + 1
-        delay = min(INITIAL_BACKOFF * count, MAX_BACKOFF_SECONDS)
-        _BACKOFF[domain] = {"count": count, "until": now + delay}
-
-
-def clear_backoff(domain: str):
-    if not domain:
-        return
-    with _LOCK:
-        if domain in _BACKOFF:
-            del _BACKOFF[domain]
-
-
-# --- Rate-slot system (SMTP concurrency limiter) ---
-
-_SLOTS = {}  # domain → current slots
-MAX_SLOTS_PER_DOMAIN = 3
-
-
-def acquire_slot(domain: str) -> bool:
-    if not domain:
-        return True
-    with _LOCK:
-        curr = _SLOTS.get(domain, 0)
-        if curr >= MAX_SLOTS_PER_DOMAIN:
-            return False
-        _SLOTS[domain] = curr + 1
-        return True
-
-
-def release_slot(domain: str):
-    if not domain:
-        return
-    with _LOCK:
-        curr = _SLOTS.get(domain, 0)
-        if curr > 0:
-            _SLOTS[domain] = curr - 1
