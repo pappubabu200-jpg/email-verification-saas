@@ -11,7 +11,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 
 from backend.app.db import Base
-    from backend.app.models.base import IdMixin, TimestampMixin
+from backend.app.models.base import IdMixin, TimestampMixin
 
 
 class Team(Base, IdMixin, TimestampMixin):
@@ -22,6 +22,7 @@ class Team(Base, IdMixin, TimestampMixin):
     - Has multiple members
     - Supports audit logs
     - Supports billing (Stripe)
+    - Supports bulk verification jobs
     """
 
     __tablename__ = "teams"
@@ -36,7 +37,6 @@ class Team(Base, IdMixin, TimestampMixin):
         index=True
     )
 
-    # Owner user
     owner_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
@@ -52,12 +52,8 @@ class Team(Base, IdMixin, TimestampMixin):
         server_default="0"
     )
 
-    stripe_customer_id: Mapped[str | None] = mapped_column(
-        String(255),
-        nullable=True
-    )
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    # Additional optional metadata
     settings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -66,31 +62,26 @@ class Team(Base, IdMixin, TimestampMixin):
     # Relationships
     # ------------------------------------
 
-    # Team owner (User)
     owner = relationship("User", back_populates="teams")
 
-    # Team members
     members = relationship(
         "TeamMember",
         back_populates="team",
         cascade="all, delete-orphan"
     )
 
-    # Team audit logs
     audit_logs = relationship(
         "AuditLog",
         back_populates="team",
         cascade="all, delete-orphan"
     )
 
-    # Team credit transactions
     credit_transactions = relationship(
         "TeamCreditTransaction",
         back_populates="team",
         cascade="all, delete-orphan"
     )
 
-    # Team balance (single record)
     balance = relationship(
         "TeamBalance",
         back_populates="team",
@@ -98,9 +89,16 @@ class Team(Base, IdMixin, TimestampMixin):
         uselist=False
     )
 
-    # Bulk verification jobs (team-wide)
+    # Bulk verification jobs (team level)
     bulk_jobs = relationship(
         "BulkJob",
+        back_populates="team",
+        cascade="all, delete-orphan"
+    )
+
+    # Team credit reservations
+    credit_reservations = relationship(
+        "CreditReservation",
         back_populates="team",
         cascade="all, delete-orphan"
     )
