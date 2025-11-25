@@ -27,6 +27,13 @@ from backend.app.services.deliverability_monitor import (
     compute_domain_score,
 )
 
+# NEW: processing lock
+from backend.app.services.processing_lock import (
+    acquire_processing_key,
+    release_processing_key,
+    wait_for_processing_result,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,9 +59,9 @@ async def verify_email_async(
     if not email:
         return {"email": email, "status": "invalid", "reason": "empty_email"}
 
-    # -----------------------------------------
-    # 1) CACHE LOOKUP (blocking -> to_thread)
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # 1) CACHE LOOKUP
+    # -----------------------------------------------------
     try:
         cached = await _to_thread(get_cached, email)
     except Exception as e:
@@ -64,29 +71,47 @@ async def verify_email_async(
     if cached:
         domain = email.split("@")[-1].lower()
         try:
-            # record_domain_result is likely blocking; run in thread
             await _to_thread(record_domain_result, domain, cached.get("status") == "valid")
         except Exception:
             pass
         return cached
 
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # 1.5) PROCESSING LOCK (DEDUPE)
+    # -----------------------------------------------------
+    got_lock = await acquire_processing_key(email, ttl=60)
+
+    if not got_lock:
+        # Another worker is verifying this email
+        maybe = await wait_for_processing_result(email, poll_interval=0.5, timeout=30)
+        if maybe:
+            return maybe
+        # Fail-open: continue to verification
+
+    # -----------------------------------------------------
     # 2) FORMAT VALIDATION
-    # -----------------------------------------
+    # -----------------------------------------------------
     if "@" not in email:
         data = {"email": email, "status": "invalid", "reason": "no_at_symbol"}
         try:
             await _to_thread(set_cached, email, data)
         except Exception:
             logger.debug("Cache set failed for invalid email")
+
+        # release lock before returning
+        try:
+            await release_processing_key(email)
+        except Exception:
+            pass
+
         return data
 
     local, domain = email.split("@", 1)
     domain = domain.lower()
 
-    # -----------------------------------------
-    # 3) MX LOOKUP (may be blocking)
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # 3) MX LOOKUP
+    # -----------------------------------------------------
     try:
         mx_hosts = await _to_thread(choose_mx_for_domain, domain)
     except Exception as e:
@@ -100,11 +125,18 @@ async def verify_email_async(
             await _to_thread(record_domain_result, domain, False)
         except Exception:
             pass
+
+        # release lock
+        try:
+            await release_processing_key(email)
+        except Exception:
+            pass
+
         return data
 
-    # -----------------------------------------
-    # 4) DOMAIN BACKOFF RESPECT (may be blocking)
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # 4) DOMAIN BACKOFF
+    # -----------------------------------------------------
     try:
         backoff_sec = await _to_thread(get_backoff_seconds, domain)
     except Exception as e:
@@ -112,65 +144,65 @@ async def verify_email_async(
         backoff_sec = 0
 
     if backoff_sec and backoff_sec > 0:
-        # Use small cap to avoid huge sleeps in request path
         await asyncio.sleep(min(backoff_sec, 8))
 
-    # -----------------------------------------
-    # 5) CONCURRENCY SLOT ACQUIRE (blocking)
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # 5) SLOT ACQUIRE
+    # -----------------------------------------------------
     try:
         slot_acquired = await _to_thread(acquire_slot, domain)
     except Exception as e:
         logger.warning("acquire_slot error (allowing attempt): %s", e)
-        slot_acquired = True  # fail-open for slot acquisition
+        slot_acquired = True
 
     if not slot_acquired:
-        # Optionally record domain result as unknown or enqueue retry
+        # release processing lock before returning
+        try:
+            await release_processing_key(email)
+        except Exception:
+            pass
+
         return {"email": email, "status": "unknown", "reason": "domain_slots_full"}
 
-    # -----------------------------------------
-    # 6) SMTP PROBE (awaitable)
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # 6) SMTP PROBE
+    # -----------------------------------------------------
     smtp_res = None
-    smtp_exception = None
     try:
         smtp_res = await smtp_probe(email, mx_hosts)
     except Exception as e:
-        smtp_exception = e
         logger.exception("SMTP probe failed: %s", e)
-        # increase backoff (run in thread)
         try:
             await _to_thread(increase_backoff, domain)
         except Exception:
-            logger.warning("increase_backoff failed")
+            pass
         smtp_res = {"email": email, "status": "error", "exception": str(e)}
     finally:
-        # Always release slot (release_slot may be blocking)
         try:
             await _to_thread(release_slot, domain)
-        except Exception as e:
-            logger.warning("release_slot failed: %s", e)
+        except Exception:
+            logger.warning("release_slot failed")
 
-    # -----------------------------------------
-    # 7) SCORING ENGINE (blocking)
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # 7) SCORING
+    # -----------------------------------------------------
     try:
         scored = await _to_thread(score_verification, smtp_res)
     except Exception as e:
         logger.exception("Scoring failed: %s", e)
         scored = {"email": email, "status": "unknown", "risk_score": 50, "raw": smtp_res}
 
-    # -----------------------------------------
-    # 8) DELIVERABILITY TRACKING
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # 8) DOMAIN TRACKING
+    # -----------------------------------------------------
     try:
         await _to_thread(record_domain_result, domain, scored.get("status") == "valid")
     except Exception:
         pass
 
-    # -----------------------------------------
-    # 9) DOMAIN REPUTATION SCORE
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # 9) DOMAIN REPUTATION
+    # -----------------------------------------------------
     try:
         mx_used = smtp_res.get("mx_host") if isinstance(smtp_res, dict) else None
         reputation = await _to_thread(compute_domain_score, domain, mx_used)
@@ -178,30 +210,37 @@ async def verify_email_async(
     except Exception:
         scored["domain_reputation"] = None
 
-    # Ensure required fields
     scored.setdefault("email", email)
     scored.setdefault("risk_score", scored.get("risk_score", 50))
 
-    # -----------------------------------------
-    # 10) CACHE SAVE (blocking)
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # 10) CACHE SAVE
+    # -----------------------------------------------------
     try:
         await _to_thread(set_cached, email, scored)
     except Exception:
-        logger.debug("Cache set failed for scored result")
+        logger.debug("Cache save failed")
 
-    # -----------------------------------------
-    # 11) DATABASE PERSISTENCE (blocking)
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # 11) DB SAVE
+    # -----------------------------------------------------
     try:
         await _to_thread(_persist_verification_result, email, user_id, scored)
     except Exception as e:
         logger.exception("DB persist failed: %s", e)
 
+    # -----------------------------------------------------
+    # RELEASE PROCESSING LOCK (always)
+    # -----------------------------------------------------
+    try:
+        await release_processing_key(email)
+    except Exception:
+        pass
+
     return scored
 
 
-# Synchronous DB persistence helper (kept sync and run in thread)
+# DB persistence helper
 def _persist_verification_result(email: str, user_id: Optional[int], scored: Dict[str, Any]):
     db = SessionLocal()
     try:
@@ -210,7 +249,7 @@ def _persist_verification_result(email: str, user_id: Optional[int], scored: Dic
             job_id=None,
             email=email,
             status=scored.get("status"),
-            risk_score=int(scored.get("risk_score", 50)) if scored.get("risk_score") is not None else None,
+            risk_score=int(scored.get("risk_score", 50)),
             raw=json.dumps(scored),
             cached=False,
         )
@@ -230,29 +269,16 @@ def _persist_verification_result(email: str, user_id: Optional[int], scored: Dic
 
 
 # ---------------------------------------------------------
-# SAFE SYNC WRAPPER (NO event-loop crash)
+# SAFE SYNC WRAPPER
 # ---------------------------------------------------------
-
 def verify_email_sync(email: str, user_id: Optional[int] = None) -> Dict[str, Any]:
-    """
-    Run async verifier safely in sync context.
-
-    If an event loop is already running in this thread, we run the async pipeline
-    inside a separate thread (creating a fresh loop there) to avoid 'RuntimeError:
-    This event loop is already running'.
-    """
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
-        # No running loop in this thread — safe to use asyncio.run
         return asyncio.run(verify_email_async(email, user_id))
     else:
-        # A running loop exists in this thread — run in a separate thread
         import concurrent.futures
-
         def _runner():
             return asyncio.run(verify_email_async(email, user_id))
-
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_runner)
-            return fut.result()
+            return ex.submit(_runner).result()
