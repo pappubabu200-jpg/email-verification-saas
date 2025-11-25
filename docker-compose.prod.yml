@@ -110,3 +110,23 @@ volumes:
   pgdata:
   redisdata:
   miniodata:
+
+
+
+  web:
+    environment:
+      REDIS_URL: redis://redis:6379/1
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+
+  worker:
+    environment:
+      REDIS_URL: redis://redis:6379/1
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+
+  beat:
+    environment:
+      REDIS_URL: redis://redis:6379/1
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
