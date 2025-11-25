@@ -3,7 +3,10 @@
 import json
 import logging
 import asyncio
+import time
 from typing import Any, Dict, Optional
+
+from prometheus_client import Counter, Histogram  # ensure prometheus_client is installed
 
 from backend.app.db import SessionLocal
 from backend.app.models.verification_result import VerificationResult
@@ -36,6 +39,44 @@ from backend.app.services.processing_lock import (
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------
+# Prometheus metrics
+# ---------------------------------------------------------
+VERIFICATION_TOTAL = Counter(
+    "verification_total",
+    "Total verification requests",
+    ["status"]
+)
+
+VERIFICATION_LATENCY_SECONDS = Histogram(
+    "verification_latency_seconds",
+    "Latency of verification pipeline in seconds",
+    ["stage"]  # stages: full, smtp
+)
+
+VERIFICATION_CACHE_TOTAL = Counter(
+    "verification_cache_total",
+    "Cache hits/misses for verification",
+    ["result"]  # hit, miss
+)
+
+VERIFICATION_BACKOFF_SECONDS = Histogram(
+    "verification_backoff_seconds",
+    "Observed backoff seconds for domains during verification",
+    ["domain"]
+)
+
+VERIFICATION_PROCESSING_LOCK_TOTAL = Counter(
+    "verification_processing_lock_total",
+    "Processing lock events (dedupe) during verification",
+    ["result"]  # acquired, waited, timeout
+)
+
+VERIFICATION_DB_FAILURE_TOTAL = Counter(
+    "verification_db_failure_total",
+    "DB persistence failures during verification"
+)
+
 
 # ---------------------------------------------------------
 # ASYNC VERIFICATION PIPELINE (non-blocking)
@@ -55,8 +96,11 @@ async def verify_email_async(
     with asyncio.to_thread to avoid blocking the event loop.
     """
 
+    start_full = time.time()
+
     email = (email or "").strip()
     if not email:
+        VERIFICATION_TOTAL.labels(status="invalid").inc()
         return {"email": email, "status": "invalid", "reason": "empty_email"}
 
     # -----------------------------------------------------
@@ -74,18 +118,33 @@ async def verify_email_async(
             await _to_thread(record_domain_result, domain, cached.get("status") == "valid")
         except Exception:
             pass
+
+        VERIFICATION_CACHE_TOTAL.labels(result="hit").inc()
+        VERIFICATION_TOTAL.labels(status=str(cached.get("status", "unknown"))).inc()
+
+        # Observe full latency
+        VERIFICATION_LATENCY_SECONDS.labels(stage="full").observe(time.time() - start_full)
         return cached
+
+    VERIFICATION_CACHE_TOTAL.labels(result="miss").inc()
 
     # -----------------------------------------------------
     # 1.5) PROCESSING LOCK (DEDUPE)
     # -----------------------------------------------------
     got_lock = await acquire_processing_key(email, ttl=60)
 
-    if not got_lock:
+    if got_lock:
+        VERIFICATION_PROCESSING_LOCK_TOTAL.labels(result="acquired").inc()
+    else:
         # Another worker is verifying this email
         maybe = await wait_for_processing_result(email, poll_interval=0.5, timeout=30)
         if maybe:
+            VERIFICATION_PROCESSING_LOCK_TOTAL.labels(result="waited").inc()
+            VERIFICATION_TOTAL.labels(status=str(maybe.get("status", "unknown"))).inc()
+            VERIFICATION_LATENCY_SECONDS.labels(stage="full").observe(time.time() - start_full)
             return maybe
+        else:
+            VERIFICATION_PROCESSING_LOCK_TOTAL.labels(result="timeout").inc()
         # Fail-open: continue to verification
 
     # -----------------------------------------------------
@@ -104,6 +163,8 @@ async def verify_email_async(
         except Exception:
             pass
 
+        VERIFICATION_TOTAL.labels(status="invalid").inc()
+        VERIFICATION_LATENCY_SECONDS.labels(stage="full").observe(time.time() - start_full)
         return data
 
     local, domain = email.split("@", 1)
@@ -132,6 +193,8 @@ async def verify_email_async(
         except Exception:
             pass
 
+        VERIFICATION_TOTAL.labels(status="invalid").inc()
+        VERIFICATION_LATENCY_SECONDS.labels(stage="full").observe(time.time() - start_full)
         return data
 
     # -----------------------------------------------------
@@ -144,6 +207,11 @@ async def verify_email_async(
         backoff_sec = 0
 
     if backoff_sec and backoff_sec > 0:
+        # record backoff metric
+        try:
+            VERIFICATION_BACKOFF_SECONDS.labels(domain=domain).observe(backoff_sec)
+        except Exception:
+            pass
         await asyncio.sleep(min(backoff_sec, 8))
 
     # -----------------------------------------------------
@@ -162,12 +230,15 @@ async def verify_email_async(
         except Exception:
             pass
 
+        VERIFICATION_TOTAL.labels(status="unknown").inc()
+        VERIFICATION_LATENCY_SECONDS.labels(stage="full").observe(time.time() - start_full)
         return {"email": email, "status": "unknown", "reason": "domain_slots_full"}
 
     # -----------------------------------------------------
     # 6) SMTP PROBE
     # -----------------------------------------------------
     smtp_res = None
+    start_smtp = time.time()
     try:
         smtp_res = await smtp_probe(email, mx_hosts)
     except Exception as e:
@@ -178,6 +249,12 @@ async def verify_email_async(
             pass
         smtp_res = {"email": email, "status": "error", "exception": str(e)}
     finally:
+        # record smtp latency
+        try:
+            VERIFICATION_LATENCY_SECONDS.labels(stage="smtp").observe(time.time() - start_smtp)
+        except Exception:
+            pass
+
         try:
             await _to_thread(release_slot, domain)
         except Exception:
@@ -228,12 +305,24 @@ async def verify_email_async(
         await _to_thread(_persist_verification_result, email, user_id, scored)
     except Exception as e:
         logger.exception("DB persist failed: %s", e)
+        try:
+            VERIFICATION_DB_FAILURE_TOTAL.inc()
+        except Exception:
+            pass
 
     # -----------------------------------------------------
     # RELEASE PROCESSING LOCK (always)
     # -----------------------------------------------------
     try:
         await release_processing_key(email)
+    except Exception:
+        pass
+
+    # Final metrics and return
+    final_status = str(scored.get("status", "unknown"))
+    try:
+        VERIFICATION_TOTAL.labels(status=final_status).inc()
+        VERIFICATION_LATENCY_SECONDS.labels(stage="full").observe(time.time() - start_full)
     except Exception:
         pass
 
