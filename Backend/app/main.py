@@ -1,4 +1,4 @@
-# backend/app/main.py
+ok# backend/app/main.py
 """
 Clean, production-ready FastAPI application entrypoint.
 
@@ -302,3 +302,6 @@ def maybe_await(fn_or_coro):
 
 # Create global app instance for uvicorn to import
 app = create_app()
+
+from backend.app.api.v1 import admin_webhook_dlq
+app.include_router(admin_webhook_dlq.router)
