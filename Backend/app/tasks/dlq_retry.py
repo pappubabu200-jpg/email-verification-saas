@@ -1,54 +1,87 @@
 # backend/app/tasks/dlq_retry.py
-import logging
+
+import json
 import time
-from typing import Any, Dict
+import logging
+
 from backend.app.celery_app import celery_app
+from backend.app.tasks.webhook_tasks import webhook_task
 from backend.app.repositories.webhook_dlq_repository import WebhookDLQRepository
-from backend.app.tasks.webhook_tasks import send_webhook_once  # lightweight synchronous helper
 from backend.app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Retry policy for reprocessing DLQ entries: exponential backoff per attempt
-RETRY_BACKOFF_BASE = float(getattr(settings, "DLQ_RETRY_BASE", 2.0))
-RETRY_BATCH_SIZE = int(getattr(settings, "DLQ_RETRY_BATCH", 50))
+DEFAULT_BACKOFF = float(getattr(settings, "DLQ_RETRY_BACKOFF", 2.0))
+MAX_BACKOFF_POWER = 6   # prevents crazy-large backoff delays
 
 
-@celery_app.task(bind=True, name="dlq.retry.worker", max_retries=0)
-def retry_webhook_dlq_batch(self, batch_size: int = RETRY_BATCH_SIZE) -> int:
+@celery_app.task(
+    name="dlq.retry.worker",
+    bind=True,
+    max_retries=0,     # this worker itself does NOT retry
+)
+def dlq_retry_worker(self):
     """
-    Fetch a batch of unprocessed DLQ entries and attempt to resend them.
-    If success => mark processed, else increment attempts + update error.
-    This task is designed to be scheduled (beat) or called manually.
-    Returns number of processed entries attempted.
+    DLQ Retry Worker
+    ----------------
+    Runs every few minutes via Celery Beat.
+
+    Workflow:
+    1. Fetch all WebhookDLQ rows that are NOT processed
+    2. For each:
+         - Calculate exponential backoff based on attempts
+         - Retry delivery by calling webhook_task.delay()
+         - On success → mark processed
+         - On failure → increase attempts counter
     """
+
     repo = WebhookDLQRepository()
-    entries = repo.list(limit=batch_size, only_unprocessed=True)
-    processed_count = 0
+    entries = repo.list(limit=200, offset=0, only_unprocessed=True)
+
+    if not entries:
+        logger.info("[DLQ] No pending entries.")
+        return {"retried": 0}
+
+    logger.info(f"[DLQ] Retrying {len(entries)} failed webhook events...")
+
+    retried = 0
 
     for entry in entries:
         try:
-            payload = entry.payload or {}
-            headers = entry.headers or {"Content-Type": "application/json"}
-            # attempt delivery (single try). We don't want to block the worker for a huge time.
-            code, text = send_webhook_once(entry.url, payload, headers=headers, timeout=10)
-            if 200 <= code < 300:
-                repo.mark_processed(entry.id)
-                logger.info(f"[DLQ] Re-delivered id={entry.id} url={entry.url} code={code}")
-            else:
-                # update attempts + error
-                repo.increment_attempts(entry.id, error=f"non-2xx {code}: {text}")
-                logger.warning(f"[DLQ] Re-delivery failed id={entry.id} url={entry.url} code={code}")
-            processed_count += 1
-            # small sleep to avoid thundering on remote endpoints
-            time.sleep(0.05)
-        except Exception as e:
+            # -----------------------------------------
+            # Parse payload & headers safely
+            # -----------------------------------------
             try:
-                repo.increment_attempts(entry.id, error=str(e))
+                payload = json.loads(entry.payload) if isinstance(entry.payload, str) else entry.payload
             except Exception:
-                logger.exception("Failed to update DLQ attempts")
-            logger.exception(f"[DLQ] Exception while re-delivering id={entry.id}: {e}")
-            processed_count += 1
-            time.sleep(0.05)
+                payload = entry.payload
 
-    return processed_count
+            try:
+                headers = json.loads(entry.headers) if entry.headers else None
+            except Exception:
+                headers = None
+
+            # -----------------------------------------
+            # Exponential Backoff BEFORE retry
+            # -----------------------------------------
+            power = min(entry.attempts, MAX_BACKOFF_POWER)
+            delay_before = DEFAULT_BACKOFF * (2 ** power)
+            time.sleep(delay_before)
+
+            # -----------------------------------------
+            # Delegate retry to original webhook task
+            # -----------------------------------------
+            async_result = webhook_task.delay(entry.url, payload, headers)
+
+            # Task queued → mark processed in DLQ
+            repo.mark_processed(entry.id)
+
+            retried += 1
+            logger.info(f"[DLQ] Re-queued webhook (id={entry.id}) url={entry.url}")
+
+        except Exception as e:
+            # Mark failed attempt
+            repo.increment_attempts(entry.id, error=str(e))
+            logger.error(f"[DLQ] Failed to retry entry id={entry.id}: {e}")
+
+    return {"retried": retried}
