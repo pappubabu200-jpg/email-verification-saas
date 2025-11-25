@@ -1,4 +1,5 @@
-  version: "3.8"
+version: "3.8"
+
 services:
   postgres:
     image: postgres:15
@@ -22,13 +23,13 @@ services:
       - redisdata:/data
     command: ["redis-server", "--save", "60", "1"]
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
-      interval: 10s
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
       timeout: 5s
       retries: 5
 
   minio:
-    image: minio/minio:RELEASE.2025-01-01T00-00-00Z
+    image: minio/minio
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
@@ -38,9 +39,9 @@ services:
     ports:
       - "9000:9000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live || exit 1"]
-      interval: 30s
-      retries: 3
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      retries: 5
 
   web:
     build:
@@ -52,21 +53,34 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - postgres
-      - redis
-      - minio
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
 
   worker:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: celery -A backend.app.celery_app.celery_app worker --loglevel=info --concurrency=4
+    command: >
+      celery -A backend.app.celery_app.celery_app worker 
+      --loglevel=info 
+      -Q default,bulk 
+      --concurrency=4
     env_file:
       - ./backend/.env.prod
     depends_on:
-      - redis
-      - postgres
-      - web
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A backend.app.celery_app.celery_app inspect ping"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
 
   beat:
     build:
@@ -76,16 +90,21 @@ services:
     env_file:
       - ./backend/.env.prod
     depends_on:
-      - redis
-      - postgres
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A backend.app.celery_app.celery_app beat --loglevel=warning --detach"]
+      interval: 30s
+      retries: 3
 
   flower:
     image: mher/flower
-    command: flower --broker=${CELERY_BROKER_URL:-redis://redis:6379/1}
+    command: flower --broker=redis://redis:6379/0
     ports:
       - "5555:5555"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
 
 volumes:
   pgdata:
