@@ -1,13 +1,14 @@
-# backend/app/services/domain_backoff.py
-
 """
-Domain-level exponential backoff system.
-Used when an SMTP server returns temporary (4xx) errors.
-Prevents hammering a throttled domain.
+Domain-level exponential backoff system (production-ready).
+
+Fixes included:
+✔ Correct TTL-based remaining delay
+✔ Persistent exponential counter
+✔ Redis pipeline atomicity
+✔ Proper cleanup on success
 """
 
 import logging
-import time
 from backend.app.config import settings
 
 try:
@@ -18,74 +19,89 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------
-# CONFIG
-# ---------------------------
-BACKOFF_KEY = "domain:backoff:{}"
-BASE_BACKOFF = int(getattr(settings, "BACKOFF_BASE", 5))     # seconds
-BACKOFF_CAP = int(getattr(settings, "BACKOFF_CAP", 300))     # max 5 minutes
+# Keys
+BACKOFF_VALUE = "domain:backoff:{}"          # stores delay (int)
+BACKOFF_COUNT = "domain:backoff:{}:count"    # stores exponential step counter
+
+BASE_BACKOFF = int(getattr(settings, "BACKOFF_BASE", 5))   # default 5 sec
+BACKOFF_CAP = int(getattr(settings, "BACKOFF_CAP", 300))   # max 5 min
 
 
-# ---------------------------
-# READ CURRENT BACKOFF
-# ---------------------------
+# -------------------------------------------------------
+# READ CURRENT BACKOFF (correct TTL-based)
+# -------------------------------------------------------
 
 def get_backoff_seconds(domain: str) -> int:
-    """
-    Return the remaining backoff time for the domain.
-    Redis: store TTL as actual delay.
-    Memory fallback: always returns 0 (disabled).
-    """
     if REDIS is None:
         return 0
 
     try:
-        v = REDIS.get(BACKOFF_KEY.format(domain))
-        if not v:
-            return 0
-        return int(v)
+        key = BACKOFF_VALUE.format(domain)
+
+        # First read TTL (remaining delay)
+        ttl = REDIS.ttl(key)
+        if ttl and ttl > 0:
+            return ttl
+
+        # Fallback: read stored value
+        v = REDIS.get(key)
+        if v:
+            try:
+                return int(v)
+            except Exception:
+                return 0
+
+        return 0
+
     except Exception:
         return 0
 
 
-# ---------------------------
-# INCREASE BACKOFF
-# ---------------------------
+# -------------------------------------------------------
+# INCREASE BACKOFF (exponential)
+# -------------------------------------------------------
 
 def increase_backoff(domain: str):
-    """
-    Increase backoff duration using exponential growth.
-    Only used on temporary/greylist/timeout errors.
-    """
     if REDIS is None:
         return
 
     try:
-        key = BACKOFF_KEY.format(domain)
-        cur = REDIS.incr(key)
+        value_key = BACKOFF_VALUE.format(domain)
+        count_key = BACKOFF_COUNT.format(domain)
+
+        # Atomically increment count
+        pipe = REDIS.pipeline()
+        pipe.incr(count_key)
+        pipe.expire(count_key, BACKOFF_CAP * 2)
+        count, _ = pipe.execute()
+
+        try:
+            count = int(count)
+        except Exception:
+            count = 1
 
         # Exponential delay
-        delay = min(BACKOFF_CAP, BASE_BACKOFF * (2 ** (int(cur) - 1)))
+        delay = min(BACKOFF_CAP, BASE_BACKOFF * (2 ** (count - 1)))
 
-        # Expire after delay seconds
-        REDIS.expire(key, delay)
+        # Set remaining delay + TTL
+        REDIS.setex(value_key, delay, delay)
 
-    except Exception:
-        pass
+        logger.info(f"[BACKOFF] {domain}: count={count} delay={delay}s")
+
+    except Exception as e:
+        logger.debug(f"backoff error: {e}")
 
 
-# ---------------------------
-# CLEAR BACKOFF
-# ---------------------------
+# -------------------------------------------------------
+# CLEAR BACKOFF (after success)
+# -------------------------------------------------------
 
 def clear_backoff(domain: str):
-    """
-    Reset backoff completely after successful validations.
-    """
     if REDIS is None:
         return
-
     try:
-        REDIS.delete(BACKOFF_KEY.format(domain))
+        REDIS.delete(BACKOFF_VALUE.format(domain))
+        REDIS.delete(BACKOFF_COUNT.format(domain))
+        logger.info(f"[BACKOFF] cleared for {domain}")
     except Exception:
         pass
