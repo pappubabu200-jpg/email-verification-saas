@@ -7,68 +7,76 @@ from backend.app.db import SessionLocal
 from backend.app.services.api_key_service import get_api_key, increment_usage
 from backend.app.services.usage_service import log_usage
 
-class ApiKeyGuard(BaseHTTPMiddleware):
+
+class APIKeyGuardMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         api_key = request.headers.get("X-API-Key")
 
+        # If request has API key
         if api_key:
             db = SessionLocal()
-            try:
-                try:
-                    ak = get_api_key(db, api_key)  # may raise HTTPException(401) or 403
-                except HTTPException as e:
-                    return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
+            ak = None
 
-                # Attach to request.state
-                request.state.api_user_id = ak.user_id
+            try:
+                # Validate API key
+                try:
+                    ak = get_api_key(db, api_key)
+                except HTTPException as e:
+                    db.close()
+                    return JSONResponse(
+                        status_code=e.status_code,
+                        content={"detail": e.detail},
+                    )
+
+                # Attach minimal metadata to request
                 request.state.api_key = api_key
                 request.state.api_key_row = ak
+                request.state.api_user_id = ak.user_id
 
-                # Enforce per-key daily usage (atomic increment + check)
+                # Create tiny user object for usage logging
+                class TinyUser:
+                    def __init__(self, uid):
+                        self.id = uid
+
+                request.state.api_user = TinyUser(ak.user_id)
+
+                # Enforce per-key usage limit (daily)
                 try:
                     increment_usage(db, ak, amount=1)
                 except HTTPException as e:
-                    # e.g., daily limit exceeded
-                    return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
-                except Exception as e:
-                    # DB or other problem; permissive: allow but log
-                    # (we do not want to block customers when DB is flaky)
+                    db.close()
+                    return JSONResponse(
+                        status_code=e.status_code,
+                        content={"detail": e.detail},
+                    )
+                except Exception:
+                    # log but do not block user
                     pass
 
             finally:
                 db.close()
 
-            # call the request
+            # Forward request
             response = await call_next(request)
 
-            # Log usage asynchronously (best-effort)
+            # Log usage (non-blocking)
             try:
-                user = getattr(request.state, "api_user", None)
-                # if middleware didn't set user object, we will leave it None; log_usage expects user object
-                # but our earlier log_usage uses user.id; to avoid issues, we pass ak.user_id via a light wrapper
-                log_usage_wrapper(request, response.status_code, ak)
+                self._safe_log_usage(request, response)
             except Exception:
                 pass
 
             return response
 
-        # No API key - proceed normally (JWT auth will be enforced by endpoints)
-        response = await call_next(request)
-        return response
+        # No API key → normal JWT flow
+        return await call_next(request)
 
+    def _safe_log_usage(self, request, response):
+        """Wrapper to call usage logging in a safe manner."""
+        try:
+            user = getattr(request.state, "api_user", None)
+            ak = getattr(request.state, "api_key_row", None)
 
-def log_usage_wrapper(request: Request, status_code: int, ak):
-    """
-    Simple wrapper to call usage_service.log_usage with DB user object minimal shape.
-    This avoids forcing the middleware to load full User object here.
-    """
-    try:
-        from backend.app.services.usage_service import log_usage
-        # create a tiny object with id property to satisfy log_usage signature
-        class TinyUser:
-            def __init__(self, uid):
-                self.id = uid
-        user_obj = TinyUser(ak.user_id)
-        log_usage(user_obj, ak, request, status_code)
-    except Exception:
-        pass
+            if user and ak:
+                log_usage(user, ak, request, response.status_code)
+        except Exception:
+            pass
