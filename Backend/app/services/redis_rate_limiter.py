@@ -1,21 +1,14 @@
+# backend/app/services/redis_rate_limiter.py
+
 """
-Redis sliding-window rate limiter (Lua script) - production-ready.
+Redis sliding-window rate limiter (Lua script) - production-ready with Prometheus metrics.
 
-Usage:
-    from backend.app.services.redis_rate_limiter import RateLimiter
-    limiter = RateLimiter(redis_url=settings.REDIS_URL)
-    allowed, retry_after = limiter.acquire("limiter:pdl:example.com", limit=5, window_seconds=1)
-    if not allowed:
-        sleep(retry_after)  # or return 429 to caller
-
-Implementation notes:
-- Uses a ZSET (sorted set) per key; members are unique ids, score is timestamp (seconds.millis)
-- On each acquire:
-    - Remove entries with score < (now - window)
-    - Count remaining entries
-    - If count + tokens <= limit => ZADD current member(s) and return allowed=1
-    - Else return allowed=0 and earliest retry_after estimate (oldest_score + window - now)
-- TTL is set on key = window_seconds * 2 to avoid unlimited memory usage
+Metrics included:
+ - rate_limiter_attempt_total{result=allowed|denied|error}
+ - rate_limiter_latency_seconds{operation=acquire|eval}
+ - rate_limiter_retry_total{attempt}
+ - rate_limiter_retry_after_seconds
+ - rate_limiter_window_count{key}
 """
 
 import time
@@ -30,16 +23,52 @@ try:
 except Exception:
     _redis = None
 
+from prometheus_client import Counter, Histogram, Gauge
+
 logger = logging.getLogger(__name__)
 
-# Lua script: remove old, get count, if allowed add, return allowed and retry_after (0 if allowed)
+# -------------------------------------------------
+# PROMETHEUS METRICS
+# -------------------------------------------------
+RATE_LIMITER_ATTEMPT_TOTAL = Counter(
+    "rate_limiter_attempt_total",
+    "Rate limiter allow/deny events",
+    ["result"]  # allowed | denied | error
+)
+
+RATE_LIMITER_LATENCY = Histogram(
+    "rate_limiter_latency_seconds",
+    "Latency for rate limiter operations",
+    ["operation"]  # acquire|eval
+)
+
+RATE_LIMITER_RETRY_TOTAL = Counter(
+    "rate_limiter_retry_total",
+    "Count of retries attempted by rate limiter",
+    ["attempt"]
+)
+
+RATE_LIMITER_RETRY_AFTER_SECONDS = Histogram(
+    "rate_limiter_retry_after_seconds",
+    "Retry-after seconds returned by sliding window limiter"
+)
+
+RATE_LIMITER_WINDOW_COUNT = Gauge(
+    "rate_limiter_window_count",
+    "Count of items currently inside sliding window",
+    ["key"]
+)
+
+# -------------------------------------------------
+# LUA SCRIPT
+# -------------------------------------------------
 _SLIDING_WINDOW_LUA = r"""
 -- ARGV:
--- 1 = now_ts (as float string)
--- 2 = window_seconds (as float string)
--- 3 = limit (integer)
--- 4 = tokens (integer)
--- 5 = key_ttl_seconds (integer)
+-- 1 = now_ts
+-- 2 = window_seconds
+-- 3 = limit
+-- 4 = tokens
+-- 5 = key_ttl_seconds
 
 local now = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
@@ -50,129 +79,165 @@ local ttl = tonumber(ARGV[5])
 local key = KEYS[1]
 local min_score = now - window
 
--- remove old entries
+-- remove outdated items
 redis.call('ZREMRANGEBYSCORE', key, '-inf', min_score)
 
--- current count
 local cur = redis.call('ZCARD', key)
 
+-- allowed path
 if (cur + tokens) <= limit then
-    -- allowed: add `tokens` entries with unique members
     for i = 1, tokens do
-        local member = tostring(now) .. "-" .. tostring(math.random()) .. "-" .. tostring(i) .. "-" .. tostring(KEYS[1])
+        local member = tostring(now) .. "-" .. tostring(math.random()) .. "-" .. tostring(i)
         redis.call('ZADD', key, now, member)
     end
-    -- set TTL for cleanup
     redis.call('EXPIRE', key, ttl)
     return {1, 0}
-else
-    -- not allowed: find oldest element's score to compute retry_after
-    local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
-    local oldest_score = 0
-    if oldest and #oldest >= 2 then
-        oldest_score = tonumber(oldest[2])
-    else
-        -- fallback: find min score with zrangebyscore
-        local minr = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
-        if minr and #minr >= 2 then
-            oldest_score = tonumber(minr[2])
-        else
-            oldest_score = min_score -- fallback
-        end
-    end
-    local retry_after = (oldest_score + window) - now
-    if retry_after < 0 then
-        retry_after = 0
-    end
-    return {0, retry_after}
 end
+
+-- deny path → compute retry-after
+local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+local oldest_score = 0
+
+if oldest and #oldest >= 2 then
+    oldest_score = tonumber(oldest[2])
+else
+    oldest_score = min_score
+end
+
+local retry_after = (oldest_score + window) - now
+if retry_after < 0 then retry_after = 0 end
+
+return {0, retry_after}
 """
 
 
 class RateLimiter:
     def __init__(self, redis_url: str = None):
         if _redis is None:
-            raise RuntimeError("redis library not available; pip install redis")
+            raise RuntimeError("redis library not installed; run: pip install redis")
+
         self.redis_url = redis_url or getattr(settings, "REDIS_URL", None)
         if not self.redis_url:
-            raise RuntimeError("REDIS_URL not configured in settings")
+            raise RuntimeError("REDIS_URL not configured")
+
         self._client = _redis.from_url(self.redis_url)
-        # Register script
+
+        # register script if possible
         try:
             self._script = self._client.register_script(_SLIDING_WINDOW_LUA)
         except Exception as e:
-            # fallback: will use EVAL each time
-            logger.debug("Failed to register lua script: %s", e)
+            logger.debug("Lua script register failed, using fallback eval: %s", e)
             self._script = None
 
     def _now_ts(self) -> float:
-        # use seconds with milliseconds precision
         return time.time()
 
-    def acquire(self, key: str, limit: int, window_seconds: float = 1.0, tokens: int = 1, max_retries: int = 3, retry_backoff: float = 0.1) -> Tuple[bool, float]:
-        """
-        Try to acquire `tokens` from the limiter.
-        Returns (allowed: bool, retry_after_seconds: float)
+    # -----------------------------------------------------
+    # ACQUIRE TOKEN
+    # -----------------------------------------------------
+    def acquire(
+        self,
+        key: str,
+        limit: int,
+        window_seconds: float = 1.0,
+        tokens: int = 1,
+        max_retries: int = 3,
+        retry_backoff: float = 0.1
+    ) -> Tuple[bool, float]:
 
-        If not allowed, retry up to `max_retries` times with exponential backoff (default small).
-        """
         now = self._now_ts()
-        ttl = max(2, int(window_seconds * 2))  # TTL ensures cleanup of idle keys
+        ttl = max(2, int(window_seconds * 2))
 
         attempt = 0
-        while True:
-            attempt += 1
-            try:
-                # prefer registered script
-                if self._script:
-                    res = self._script(keys=[key], args=[str(now), str(window_seconds), str(int(limit)), str(int(tokens)), str(ttl)])
-                    # res is [allowed_int (0/1), retry_after_float]
-                    if not res:
-                        # fallback unexpected
-                        return True, 0.0
-                    allowed = bool(int(res[0]))
-                    retry_after = float(res[1])
-                    if allowed:
-                        return True, 0.0
-                    else:
-                        # not allowed
-                        if attempt >= max_retries:
-                            return False, float(retry_after)
-                        # small sleep then try again
-                        sleep_time = float(retry_after) if retry_after and retry_after > 0 else retry_backoff * (2 ** (attempt - 1))
-                        time.sleep(sleep_time)
-                        now = self._now_ts()
-                        continue
-                else:
-                    # fallback to EVAL (same lua)
-                    res = self._client.eval(_SLIDING_WINDOW_LUA, 1, key, str(now), str(window_seconds), str(int(limit)), str(int(tokens)), str(ttl))
-                    allowed = bool(int(res[0]))
-                    retry_after = float(res[1])
-                    if allowed:
-                        return True, 0.0
-                    else:
-                        if attempt >= max_retries:
-                            return False, float(retry_after)
-                        sleep_time = float(retry_after) if retry_after and retry_after > 0 else retry_backoff * (2 ** (attempt - 1))
-                        time.sleep(sleep_time)
-                        now = self._now_ts()
-                        continue
-            except _redis.exceptions.ResponseError as e:
-                logger.exception("Redis script error: %s", e)
-                # permissive fallback: allow to avoid blocking critical path
-                return True, 0.0
-            except Exception as e:
-                logger.debug("RateLimiter transient error: %s", e)
-                # on redis connectivity issues, be permissive
-                return True, 0.0
 
+        with RATE_LIMITER_LATENCY.labels(operation="acquire").time():
+
+            while True:
+                attempt += 1
+                RATE_LIMITER_RETRY_TOTAL.labels(attempt=str(attempt)).inc()
+
+                try:
+                    # fast path (evalsha)
+                    if self._script:
+                        res = self._script(
+                            keys=[key],
+                            args=[
+                                str(now),
+                                str(window_seconds),
+                                str(int(limit)),
+                                str(int(tokens)),
+                                str(ttl)
+                            ]
+                        )
+                    else:
+                        # fallback: direct EVAL
+                        with RATE_LIMITER_LATENCY.labels(operation="eval").time():
+                            res = self._client.eval(
+                                _SLIDING_WINDOW_LUA,
+                                1, key,
+                                str(now),
+                                str(window_seconds),
+                                str(int(limit)),
+                                str(int(tokens)),
+                                str(ttl)
+                            )
+
+                    if not res:
+                        RATE_LIMITER_ATTEMPT_TOTAL.labels(result="error").inc()
+                        return True, 0.0  # fail-open
+
+                    allowed = bool(int(res[0]))
+                    retry_after = float(res[1])
+
+                    # metric for retry-after
+                    RATE_LIMITER_RETRY_AFTER_SECONDS.observe(retry_after)
+
+                    # update current window count
+                    try:
+                        count = self._client.zcount(key, now - window_seconds, now)
+                        RATE_LIMITER_WINDOW_COUNT.labels(key=key).set(count)
+                    except Exception:
+                        pass
+
+                    if allowed:
+                        RATE_LIMITER_ATTEMPT_TOTAL.labels(result="allowed").inc()
+                        return True, 0.0
+
+                    # denied path
+                    RATE_LIMITER_ATTEMPT_TOTAL.labels(result="denied").inc()
+
+                    if attempt >= max_retries:
+                        return False, retry_after
+
+                    # sleep using retry_after or exponential backoff
+                    sleep_time = retry_after if retry_after > 0 else (retry_backoff * (2 ** (attempt - 1)))
+                    time.sleep(sleep_time)
+
+                    # refresh timestamp
+                    now = self._now_ts()
+                    continue
+
+                except _redis.exceptions.ResponseError as e:
+                    logger.error("Redis script error: %s", e)
+                    RATE_LIMITER_ATTEMPT_TOTAL.labels(result="error").inc()
+                    return True, 0.0
+
+                except Exception as e:
+                    logger.debug("RateLimiter transient error: %s", e)
+                    RATE_LIMITER_ATTEMPT_TOTAL.labels(result="error").inc()
+                    return True, 0.0
+
+
+    # -----------------------------------------------------
+    # GET WINDOW COUNT
+    # -----------------------------------------------------
     def get_count(self, key: str, window_seconds: float = 1.0) -> int:
-        """
-        Return current count in window (best-effort).
-        """
         try:
             now = self._now_ts()
             min_score = now - window_seconds
-            return int(self._client.zcount(key, min_score, now))
+            count = int(self._client.zcount(key, min_score, now))
+            RATE_LIMITER_WINDOW_COUNT.labels(key=key).set(count)
+            return count
         except Exception:
+            RATE_LIMITER_WINDOW_COUNT.labels(key=key).set(0)
             return 0
