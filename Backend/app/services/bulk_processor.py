@@ -11,6 +11,65 @@ from typing import List, Optional, Tuple, Any
 from pathlib import Path
 import inspect
 
+# ---------------------------------------------------------
+# PROMETHEUS METRICS
+# ---------------------------------------------------------
+from prometheus_client import Counter, Histogram
+
+# Bulk job lifecycle
+BULK_JOB_TOTAL = Counter(
+    "bulk_job_total",
+    "Bulk job lifecycle",
+    ["status"]  # queued|running|completed|failed
+)
+
+# Chunk-level metrics
+BULK_CHUNK_LATENCY = Histogram(
+    "bulk_chunk_latency_seconds",
+    "Processing latency for each chunk"
+)
+
+BULK_CHUNK_EMAIL_TOTAL = Counter(
+    "bulk_chunk_email_total",
+    "Emails processed in bulk chunks",
+    ["result"]  # valid|invalid|error
+)
+
+# Email verify + output write metrics
+BULK_CSV_WRITE_TOTAL = Counter(
+    "bulk_csv_write_total",
+    "CSV rows written by bulk jobs",
+    ["result"]  # ok|error
+)
+
+# Domain throttling
+BULK_SLOT_THROTTLE_TOTAL = Counter(
+    "bulk_slot_throttle_total",
+    "Emails skipped due to domain throttle",
+    ["domain"]
+)
+
+BULK_BACKOFF_SECONDS = Histogram(
+    "bulk_backoff_seconds",
+    "Domain backoff seconds observed in bulk pipeline",
+    ["domain"]
+)
+
+# Entire job latency
+BULK_JOB_LATENCY = Histogram(
+    "bulk_job_latency_seconds",
+    "Total processing time for a bulk job"
+)
+
+# Job failure counter
+BULK_JOB_FAILURE_TOTAL = Counter(
+    "bulk_job_failure_total",
+    "Bulk job failures"
+)
+
+# ---------------------------------------------------------
+# ORIGINAL IMPORTS (unchanged)
+# ---------------------------------------------------------
 from backend.app.db import SessionLocal
 from backend.app.models.bulk_job import BulkJob
 from backend.app.models.verification_result import VerificationResult
@@ -69,7 +128,7 @@ def _call_add_credits(user_id: int, amount: Decimal, reference: str = None) -> b
 
 
 # ---------------------------------------------------------
-# CSV Writer Thread (single-writer)
+# CSV Writer Thread
 # ---------------------------------------------------------
 
 class CSVWriterThread(threading.Thread):
@@ -102,7 +161,9 @@ class CSVWriterThread(threading.Thread):
 
                 try:
                     writer.writerow(item)
+                    BULK_CSV_WRITE_TOTAL.labels(result="ok").inc()
                 except Exception:
+                    BULK_CSV_WRITE_TOTAL.labels(result="error").inc()
                     try:
                         fh.write(",".join([str(x) for x in item]) + "\n")
                     except Exception as e:
@@ -156,6 +217,8 @@ def read_emails_from_path(path: str):
 # ---------------------------------------------------------
 
 def process_chunk(emails_chunk: List[str], output_queue: "queue.Queue", output_path: str) -> Tuple[int, int, int]:
+    start_chunk = time.time()
+
     vcount = 0
     icount = 0
     pcount = 0
@@ -169,10 +232,12 @@ def process_chunk(emails_chunk: List[str], output_queue: "queue.Queue", output_p
             backoff = 0
 
         if backoff > 0:
+            BULK_BACKOFF_SECONDS.labels(domain=domain).observe(backoff)
             time.sleep(min(backoff, 10))
 
         got = acquire_slot(domain) if domain else True
         if not got:
+            BULK_SLOT_THROTTLE_TOTAL.labels(domain=domain).inc()
             output_queue.put((email, "skipped_throttle", None, "domain_throttle"))
             icount += 1
             pcount += 1
@@ -188,9 +253,11 @@ def process_chunk(emails_chunk: List[str], output_queue: "queue.Queue", output_p
             pcount += 1
 
             if status == "valid":
+                BULK_CHUNK_EMAIL_TOTAL.labels(result="valid").inc()
                 vcount += 1
                 clear_backoff(domain)
             else:
+                BULK_CHUNK_EMAIL_TOTAL.labels(result="invalid").inc()
                 icount += 1
                 rc = res.get("rcpt_response_code") or res.get("rcpt_code")
                 try:
@@ -202,6 +269,7 @@ def process_chunk(emails_chunk: List[str], output_queue: "queue.Queue", output_p
 
         except Exception as e:
             logger.exception("verify failed for %s: %s", email, e)
+            BULK_CHUNK_EMAIL_TOTAL.labels(result="error").inc()
             output_queue.put((email, "error", None, str(e)))
             pcount += 1
             icount += 1
@@ -209,6 +277,7 @@ def process_chunk(emails_chunk: List[str], output_queue: "queue.Queue", output_p
         finally:
             release_slot(domain)
 
+    BULK_CHUNK_LATENCY.observe(time.time() - start_chunk)
     return vcount, icount, pcount
 
 
@@ -259,6 +328,8 @@ def finalize_job_and_refund(db_session, job: BulkJob, estimated_cost: Decimal, a
 # ---------------------------------------------------------
 
 def process_bulk_job(job_id: str, estimated_cost: Decimal):
+    start_job = time.time()
+
     db = SessionLocal()
     writer_q = queue.Queue()
     writer_thread = None
@@ -269,6 +340,8 @@ def process_bulk_job(job_id: str, estimated_cost: Decimal):
         if not job:
             logger.error("Bulk job not found: %s", job_id)
             return
+
+        BULK_JOB_TOTAL.labels(status="running").inc()
 
         job.status = "running"
         db.add(job)
@@ -317,8 +390,14 @@ def process_bulk_job(job_id: str, estimated_cost: Decimal):
 
         finalize_job_and_refund(db, job, estimated_cost, actual_count=total)
 
+        BULK_JOB_TOTAL.labels(status="completed").inc()
+        BULK_JOB_LATENCY.observe(time.time() - start_job)
+
     except Exception as e:
         logger.exception("Bulk job failed: %s", e)
+        BULK_JOB_TOTAL.labels(status="failed").inc()
+        BULK_JOB_FAILURE_TOTAL.inc()
+
         if job:
             job.status = "failed"
             job.error_message = str(e)
