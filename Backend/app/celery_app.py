@@ -1,11 +1,57 @@
+# backend/app/celery_app.py
 from celery import Celery
+from kombu import Exchange, Queue
 import os
+import logging
+
 from backend.app.config import settings
 
-broker = os.getenv("CELERY_BROKER_URL") or settings.CELERY_BROKER_URL or settings.REDIS_URL
-celery_app = Celery("worker", broker=broker, backend=broker)
-# In production you may want to disable task_always_eager and run real workers.
-celery_app.conf.task_always_eager = False
-celery_app.conf.task_serializer = "json"
-celery_app.conf.result_serializer = "json"
-celery_app.conf.accept_content = ["json"]
+logger = logging.getLogger(__name__)
+
+REDIS_URL = getattr(settings, "REDIS_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+CELERY_BROKER_URL = getattr(settings, "CELERY_BROKER_URL", REDIS_URL)
+CELERY_RESULT_BACKEND = getattr(settings, "CELERY_RESULT_BACKEND", REDIS_URL)
+
+def make_celery_app(app_name: str = "email_verification_saas") -> Celery:
+    celery = Celery(
+        app_name,
+        broker=CELERY_BROKER_URL,
+        backend=CELERY_RESULT_BACKEND,
+        include=[
+            "backend.app.tasks.bulk_tasks",
+        ],
+    )
+
+    # Basic recommended config — tune for production
+    celery.conf.update(
+        task_acks_late=True,            # ack after task success
+        worker_prefetch_multiplier=1,   # fair scheduling
+        task_reject_on_worker_lost=True,
+        worker_max_tasks_per_child=100, # avoid memory leaks
+        task_serializer="json",
+        result_serializer="json",
+        accept_content=["json"],
+        timezone=getattr(settings, "TIMEZONE", "UTC"),
+        enable_utc=True,
+        broker_pool_limit=10,
+        broker_heartbeat=30,
+        result_expires=3600,
+    )
+
+    # example queue config
+    celery.conf.task_queues = (
+        [
+            Queue("default", Exchange("default"), routing_key="default"),
+            Queue("bulk_jobs", Exchange("bulk_jobs"), routing_key="bulk_jobs"),
+        ]
+    )
+
+    # optional: task routes so bulk tasks go to bulk_jobs queue
+    celery.conf.task_routes = {
+        "backend.app.tasks.bulk_tasks.process_bulk_job_task": {"queue": "bulk_jobs", "routing_key": "bulk_jobs"},
+    }
+
+    return celery
+
+
+celery_app = make_celery_app()
