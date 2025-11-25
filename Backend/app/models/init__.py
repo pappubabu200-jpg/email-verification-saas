@@ -38,6 +38,7 @@ from .decision_maker import DecisionMaker
 # -----------------------------------
 from .webhook_endpoint import WebhookEndpoint
 from .webhook_event import WebhookEvent
+from .webhook_dlq import WebhookDLQ
 
 # -----------------------------------
 # Logs & Analytics
@@ -51,3 +52,4 @@ from .api_usage_summary import ApiUsageSummary
 # -----------------------------------
 from .domain_cache import DomainCache
 from .failed_job import FailedJob
+
