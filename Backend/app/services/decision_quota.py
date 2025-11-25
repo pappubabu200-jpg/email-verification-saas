@@ -1,52 +1,58 @@
-
 """
 Decision Finder Quota Service (Redis-backed)
 
-Key design:
-- Per-user daily quota stored as Redis key: decision:quota:{user_id}:{YYYYMMDD}
-- Atomic INCR used to consume quota
-- Key TTL set to seconds remaining until next UTC midnight (so it auto-resets)
-- Supports simple plans by checking `user.plan` attribute (if present)
-- Fallback plan values:
-    free  -> 20 searches/day
-    pro   -> 200 searches/day
-    ent   -> 1000000 (effectively unlimited)
-- Raises fast HTTPException(429) on limit hit to integrate with FastAPI
+Implements per-user daily quota using Redis atomic INCRBY.
+
+Features:
+- Per-user, per-day key: decision:quota:{user_id}:{YYYYMMDD}
+- Auto-reset at next UTC midnight (TTL)
+- Plan-based limits: free → 20/day, pro → 200/day, enterprise → unlimited
+- Provides:
+    - get_usage(user_id)
+    - check_and_consume(user_obj, amount=1)
+- Fail-open if Redis unavailable (prevents blocking core functionality)
 """
 
 from datetime import datetime, timedelta
 from typing import Tuple
-import calendar
-
 from fastapi import HTTPException
+
 from backend.app.config import settings
 
+# ----------------------------------------
+# Redis Setup
+# ----------------------------------------
 try:
     import redis as _redis
-    REDIS = _redis.from_url(settings.REDIS_URL) if getattr(settings, "REDIS_URL", None) else None
+    REDIS = _redis.from_url(settings.REDIS_URL) if settings.REDIS_URL else None
 except Exception:
     REDIS = None
 
-# Default limits (can be overridden by adding plan attribute to user object)
+
+# ----------------------------------------
+# Plan Limits (can be overridden in .env)
+# ----------------------------------------
 DEFAULT_PLAN_LIMITS = {
     "free": int(getattr(settings, "DECISION_FINDER_FREE_DAILY", 20)),
     "pro": int(getattr(settings, "DECISION_FINDER_PRO_DAILY", 200)),
-    "enterprise": int(getattr(settings, "DECISION_FINDER_ENT_DAILY", 1000000)),
+    "enterprise": int(getattr(settings, "DECISION_FINDER_ENT_DAILY", 1_000_000)),
 }
 
 
+# ----------------------------------------
+# Internal Helpers
+# ----------------------------------------
 def _today_ymd() -> str:
-    # Use UTC date; change if you want local timezone
-    now = datetime.utcnow()
-    return now.strftime("%Y%m%d")
+    """Return current UTC date as YYYYMMDD string."""
+    return datetime.utcnow().strftime("%Y%m%d")
 
 
 def _seconds_until_utc_midnight() -> int:
+    """TTL until next UTC midnight."""
     now = datetime.utcnow()
     tomorrow = now + timedelta(days=1)
     midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day)
-    delta = midnight - now
-    return int(delta.total_seconds()) + 2  # small safety buffer
+    return int((midnight - now).total_seconds()) + 2  # small buffer
 
 
 def _quota_key(user_id: int, date_ymd: str = None) -> str:
@@ -55,38 +61,47 @@ def _quota_key(user_id: int, date_ymd: str = None) -> str:
     return f"decision:quota:{user_id}:{date_ymd}"
 
 
+# ----------------------------------------
+# Plan Resolution
+# ----------------------------------------
 def get_plan_limit_for_user(user_obj) -> int:
     """
-    Determine plan limit from user object.
-    If user_obj has attribute `plan` (string), map to DEFAULT_PLAN_LIMITS.
-    Else fallback to free.
+    Resolve plan limit based on:
+      - user.plan
+      - or user.plan_name
+      - or user.stripe_plan
+    Fallback → free
     """
     if not user_obj:
         return DEFAULT_PLAN_LIMITS["free"]
-    plan = getattr(user_obj, "plan", None)
-    if not plan:
-        # maybe you stored in user.profile_plan or stripe plan - try common names
-        plan = getattr(user_obj, "plan_name", None) or getattr(user_obj, "stripe_plan", None)
-    plan = (plan or "free").lower()
+
+    plan = (
+        getattr(user_obj, "plan", None)
+        or getattr(user_obj, "plan_name", None)
+        or getattr(user_obj, "stripe_plan", None)
+        or "free"
+    )
+
+    plan = str(plan).lower()
     return DEFAULT_PLAN_LIMITS.get(plan, DEFAULT_PLAN_LIMITS["free"])
 
 
+# ----------------------------------------
+# Public API
+# ----------------------------------------
 def get_usage(user_id: int) -> Tuple[int, int]:
     """
-    Return (used, limit) for today's usage for user_id.
-    If Redis not available, return (0, limit) to be permissive.
+    Returns (used, limit_for_free_plan).
+    Caller should use get_plan_limit_for_user() for actual plan limit.
+    If Redis unavailable → (0, free_limit)
     """
-    # Fetch user limit: we can't load user model here (to keep separation),
-    # so caller may supply limit; this helper will just read redis count.
     key = _quota_key(user_id)
     if not REDIS:
-        # permissive fallback (no quota enforced without Redis)
-        return 0, DEFAULT_PLAN_LIMITS["free"]
+        return 0, DEFAULT_PLAN_LIMITS["free"]  # fail-open
+
     try:
-        v = REDIS.get(key)
-        used = int(v) if v else 0
-        # limit unknown here; caller should call get_plan_limit_for_user
-        # but we'll return free limit as fallback
+        val = REDIS.get(key)
+        used = int(val) if val else 0
         return used, DEFAULT_PLAN_LIMITS["free"]
     except Exception:
         return 0, DEFAULT_PLAN_LIMITS["free"]
@@ -94,42 +109,47 @@ def get_usage(user_id: int) -> Tuple[int, int]:
 
 def check_and_consume(user_obj, amount: int = 1):
     """
-    Atomically try to consume `amount` searches for the user.
-    Raises HTTPException(status_code=429) if limit exceeded.
-    Returns tuple (used_after, limit)
+    Atomically consumes `amount` quota units.
+    Raises 429 when user exceeds plan limit.
+    Returns (used_after, limit).
     """
-    # if Redis unavailable, allow (fail-open)
     if not REDIS:
-        return 0, get_plan_limit_for_user(user_obj)
+        return 0, get_plan_limit_for_user(user_obj)  # fail-open
 
     user_id = getattr(user_obj, "id", None)
-    if user_id is None:
-        # if user object missing, block (safety)
+    if not user_id:
         raise HTTPException(status_code=401, detail="user_required")
 
     limit = get_plan_limit_for_user(user_obj)
     key = _quota_key(user_id)
+
     try:
-        # INCRBY atomic
         used_after = REDIS.incrby(key, amount)
-        # set TTL to midnight if key was just created (when used_after == amount)
+
+        # Set TTL only when key created
         if used_after == amount:
             ttl = _seconds_until_utc_midnight()
             try:
                 REDIS.expire(key, ttl)
             except Exception:
                 pass
-        # if over the limit, rollback increment and raise
+
         if used_after > limit:
-            # decrement back
+            # Rollback over-increment
             try:
                 REDIS.decrby(key, amount)
             except Exception:
                 pass
-            raise HTTPException(status_code=429, detail="decision_finder_quota_exceeded")
+            raise HTTPException(
+                status_code=429,
+                detail="decision_finder_quota_exceeded"
+            )
+
         return used_after, limit
+
     except HTTPException:
         raise
+
     except Exception:
-        # on unexpected errors, be permissive: allow the call
+        # Fail-open fallback
         return 0, limit
