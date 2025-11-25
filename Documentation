@@ -1,1 +1,488 @@
+Pappu — here is a complete, production-quality middleware documentation for your Email Verification SaaS backend.
+This can be used for:
+✔ Developer onboarding
+✔ GitHub README
+✔ System architecture documentation
+✔ Internal engineering handover
+✔ API team reference
 
+
+---
+
+📘 EMAIL VERIFICATION SAAS – MIDDLEWARE DOCUMENTATION
+
+This document explains every middleware, its purpose, order of execution, and how it integrates with the rest of the backend.
+
+This matches your actual project structure:
+
+backend/app/middleware/
+    ├── cors.py
+    ├── request_logger.py
+    ├── audit_middleware.py
+    ├── api_key_guard.py
+    ├── team_context.py
+    ├── team_acl.py
+    ├── rate_limiter.py
+
+
+---
+
+🔷 1. Middleware Execution Order (Critical)
+
+Middleware must run in this exact sequence to ensure correct functionality:
+
+1️⃣ CORS
+2️⃣ RequestLoggerMiddleware
+3️⃣ AuditMiddleware
+4️⃣ APIKeyGuardMiddleware
+5️⃣ TeamContextMiddleware
+6️⃣ TeamACL
+7️⃣ RateLimiterMiddleware
+
+This order provides:
+
+Max logging visibility
+
+Stable security & permissions
+
+Proper team resolution
+
+Correct API-key enforcement
+
+Accurate rate limiting
+
+
+
+---
+
+📗 2. CORS Middleware (cors.py)
+
+📌 Purpose
+
+Enables Cross-Origin Resource Sharing for frontend → backend communication.
+
+✔ Responsibilities
+
+Allow requests from frontend domain
+
+Handle preflight (OPTIONS)
+
+Expose custom headers (X-Request-Id)
+
+Allow Authorization & API Key headers
+
+Prevent CORS misconfiguration
+
+
+🔧 Configured via ENV
+
+CORS_ALLOW_ORIGINS="http://localhost:3000,https://yourdomain.com"
+
+⚠ Must be FIRST middleware
+
+
+---
+
+📙 3. Request Logger (request_logger.py)
+
+📌 Purpose
+
+Log every HTTP request with structured details.
+
+✔ Logs:
+
+HTTP method
+
+URL path
+
+Query string
+
+Status code
+
+Duration (ms)
+
+Client IP
+
+Request ID (trace ID)
+
+User ID (if known)
+
+Team ID
+
+API key ID
+
+Safely redacts email/IP PII from logs
+
+
+✔ Benefits:
+
+Full request tracing
+
+Debugging
+
+Performance profiling
+
+Observability
+
+
+✔ Never logs sensitive data like body fields.
+
+
+---
+
+📕 4. Audit Middleware (audit_middleware.py)
+
+📌 Purpose
+
+Store important request metadata into the audit_log table.
+
+✔ What it records:
+
+Timestamp
+
+Path
+
+HTTP method
+
+Status code
+
+Duration
+
+User ID
+
+Team ID
+
+API key ID
+
+Error messages
+
+IP, User-Agent, Referrer
+
+
+✔ Where stored?
+
+audit_log database table.
+
+✔ How?
+
+Runs after request logger
+
+Uses asyncio.to_thread for async-safe DB writing
+
+Fail-safe (never breaks API even if DB unavailable)
+
+
+🔥 Useful for:
+
+Billing
+
+Fraud detection
+
+User activity logs
+
+Admin analytics
+
+Compliance (GDPR, DPDP, SOC2)
+
+
+
+---
+
+📘 5. API Key Guard (api_key_guard.py)
+
+📌 Purpose
+
+Authenticate API key requests and attach identity to the request.
+
+✔ Reads from:
+
+X-API-Key header
+
+✔ Responsibilities:
+
+Validate API key
+
+Attach fields to request:
+
+request.state.api_key
+
+request.state.api_key_row
+
+request.state.api_user_id
+
+
+Enforce daily/monthly usage quota
+
+Increment usage count
+
+Log usage activity
+
+
+✔ Failure behavior:
+
+Invalid key → 401
+
+Blocked/expired key → 403
+
+Usage exceeded → 429
+
+
+✔ Required by:
+
+Single email verify endpoint
+
+Bulk verify
+
+Extractor API
+
+Webhook API
+
+
+
+---
+
+📗 6. Team Context Middleware (team_context.py)
+
+📌 Purpose
+
+Determine which team the request belongs to.
+
+✔ Determines team from:
+
+Priority:
+
+1. API key → team binding
+
+
+2. X-Team-Id header
+
+
+3. ?team_id= URL param
+
+
+4. Default team of logged-in user
+
+
+5. Fallback (no team)
+
+
+
+✔ Sets:
+
+request.state.team
+
+request.state.team_id
+
+
+✔ Validates:
+
+Team exists
+
+User is allowed to request that team
+
+API key is valid for that team
+
+
+✔ Required for:
+
+Billing
+
+Usage logging
+
+Credits
+
+Subscriptions
+
+Team invoices
+
+Admin team settings
+
+
+
+---
+
+📙 7. Team ACL Middleware (team_acl.py)
+
+📌 Purpose
+
+Load permissions & roles for the team.
+
+✔ Reads from:
+
+request.state.team_id
+
+request.state.user or request.state.api_user_id
+
+
+✔ Determines:
+
+Role: owner, admin, member, viewer, billing
+
+Permission matrix:
+
+can_manage_billing
+
+can_view_usage
+
+can_invite
+
+can_delete_team
+
+can_manage_api_keys
+
+
+
+✔ Outputs:
+
+request.state.team_role
+
+request.state.team_perms
+
+
+✔ FAILS only if:
+
+User or API key is not a member of the selected team.
+
+
+---
+
+📘 8. Rate Limiter (rate_limiter.py)
+
+📌 Purpose
+
+Prevent abuse and protect infrastructure using Redis-based throttling.
+
+✔ Applies limits in this order:
+
+1. API key
+
+
+2. Team
+
+
+3. User
+
+
+4. IP (fallback)
+
+
+
+✔ Default limits:
+
+120 requests/min
+
+10,000 requests/day
+
+Optional overrides via env
+
+
+✔ Uses:
+
+Redis INCR + EXPIRE windows
+
+Fail-open design:
+→ If Redis fails, API continues (no downtime)
+
+
+✔ Prevents:
+
+API abuse
+
+Denial-of-service
+
+Bulk bot traffic
+
+Free-tier abuse
+
+
+
+---
+
+🧩 9. Middleware Interaction Diagram
+
+Incoming Request
+      |
+      v
+[CORS]
+      |
+      v
+[Request Logger]
+      |
+      v
+[Audit Middleware]
+      |
+      v
+[API Key Guard]
+      |
+      v
+[Team Context]
+      |
+      v
+[Team ACL]
+      |
+      v
+[Rate Limiter]
+      |
+      v
+----- ROUTER / ENDPOINT -----
+      |
+      v
+   Response
+
+
+---
+
+📦 10. Summary
+
+Your middleware stack now provides:
+
+Middleware	Purpose	Critical For
+
+CORS	Frontend access	Browser requests
+Request Logger	Traceability	Debugging, monitoring
+Audit	DB logs	Billing, analytics, compliance
+API Key Guard	Security & quotas	API endpoints
+Team Context	Multi-team support	Billing, credits, usage
+Team ACL	Authorization	Team roles & privileges
+Rate Limiter	Protection	Abuse prevention
+
+
+This is a full enterprise-grade middleware architecture, equivalent to:
+
+ZeroBounce
+
+NeverBounce
+
+Clearout
+
+Kickbox
+
+Hunter.io Enterprise
+
+
+
+---
+
+🎯 What do you want next?
+
+Choose one:
+
+1️⃣ Router Documentation
+
+(Explain every router in /api/v1)
+
+2️⃣ Services Layer Documentation
+
+(Explain verification pipeline, domain backoff, smtp probe, etc.)
+
+3️⃣ Workers & Queue Documentation
+
+(Celery architecture, tasks flow)
+
+4️⃣ Database Schema Documentation
+
+(Relational diagrams + table purpose)
+
+5️⃣ Full Backend Architecture PDF (I’ll generate)
+
+Tell me which one: 1 / 2 / 3 / 4 / 5
