@@ -1,57 +1,52 @@
 # backend/app/tasks/webhook_tasks.py
-"""
-Webhook delivery worker with:
-- Exponential backoff
-- Random jitter
-- Timeout safety
-- 5 retry attempts
-- DLQ (dead-letter queue) optional
-"""
-
-from __future__ import annotations
-import json
-import logging
-import random
 import requests
-from celery import shared_task
+import logging
+from backend.app.celery_app import celery_app
+from backend.app.config import settings
 
 logger = logging.getLogger(__name__)
 
-TIMEOUT = 6  # seconds
-MAX_RETRIES = 5
+DEFAULT_BACKOFF = float(getattr(settings, "WEBHOOK_BACKOFF", 2.0))
 
 
-@shared_task(
-    bind=True,
-    name="backend.app.tasks.webhook_tasks.send_webhook",
-    autoretry_for=(Exception,),
-    retry_backoff=True,        # exponential
-    retry_backoff_max=60,      # 1 min
-    retry_jitter=True,         # add randomness
-    retry_kwargs={"max_retries": MAX_RETRIES},
-)
-def send_webhook(self, url: str, payload: dict):
+def send_webhook_once(url: str, payload: dict, headers=None, timeout=10):
     """
-    POST JSON webhook with retries.
+    Single attempt — no retry here.
+    Used inside Celery task which handles retries itself.
+    """
+    headers = headers or {"Content-Type": "application/json"}
+    r = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    return r.status_code, r.text
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=5,
+    name="webhook.task",
+)
+def webhook_task(self, url: str, payload: dict, headers=None):
+    """
+    Production webhook delivery:
+    - Celery retry backoff
+    - Logs failures
+    - 5 retry attempts
+    - Exponential backoff
     """
     try:
-        resp = requests.post(
-            url,
-            json=payload,
-            timeout=TIMEOUT,
-            headers={"Content-Type": "application/json"},
-        )
+        code, text = send_webhook_once(url, payload, headers=headers)
+        if 200 <= code < 300:
+            logger.info(f"[WEBHOOK] Delivered to {url} -> {code}")
+            return True
 
-        # Retry on non-200
-        if resp.status_code >= 400:
-            logger.warning(
-                f"Webhook failed ({resp.status_code}) -> retrying URL={url}"
-            )
-            raise Exception(f"webhook_http_error:{resp.status_code}")
-
-        logger.info(f"Webhook delivered → {url}")
-        return {"ok": True, "status": resp.status_code}
+        raise Exception(f"non-2xx response: {code} {text}")
 
     except Exception as e:
-        logger.exception(f"Webhook send error: {e}")
-        raise  # triggers Celery autoretry
+        # exponential backoff = (BACKOFF * 2^retry)
+        delay = DEFAULT_BACKOFF * (2 ** self.request.retries)
+        logger.warning(f"[WEBHOOK] Retry in {delay:.1f}s error={e}")
+
+        try:
+            raise self.retry(countdown=delay, exc=e)
+        except self.MaxRetriesExceededError:
+            logger.error(f"[WEBHOOK] PERMANENT FAILURE url={url} err={e}")
+            return False
