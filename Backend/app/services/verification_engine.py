@@ -16,7 +16,6 @@ from backend.app.services.verification_score import score_verification
 from backend.app.services.domain_backoff import (
     get_backoff_seconds,
     increase_backoff,
-    clear_backoff,
     acquire_slot,
     release_slot,
 )
@@ -34,26 +33,26 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------
 
 async def verify_email_async(
-    email: str, 
+    email: str,
     user_id: int | None = None
 ) -> Dict[str, Any]:
     """
-    Full production email verification flow:
+    Production verification pipeline:
       ✔ Cache lookup
       ✔ MX lookup
-      ✔ Domain backoff wait
-      ✔ Slot-based concurrency limiter
-      ✔ SMTP probe (async/sync hybrid)
-      ✔ Risk scoring
-      ✔ Deliverability tracking
+      ✔ Domain backoff sleep
+      ✔ Domain concurrency slot
+      ✔ SMTP probe
+      ✔ Risk scoring engine
+      ✔ Deliverability history update
       ✔ Domain reputation score
       ✔ Cache store
       ✔ Database persistence
     """
 
-    # -----------------------------------------------------
-    # 1) CACHE CHECK
-    # -----------------------------------------------------
+    # -----------------------------------------
+    # 1) CACHE LOOKUP
+    # -----------------------------------------
     cached = get_cached(email)
     if cached:
         domain = email.split("@")[-1].lower()
@@ -63,60 +62,60 @@ async def verify_email_async(
             pass
         return cached
 
-    # -----------------------------------------------------
-    # 2) BASIC FORMAT CHECK
-    # -----------------------------------------------------
+    # -----------------------------------------
+    # 2) FORMAT VALIDATION
+    # -----------------------------------------
     if "@" not in email:
-        result = {
+        data = {
             "email": email,
             "status": "invalid",
             "reason": "no_at_symbol"
         }
-        set_cached(email, result)
-        return result
+        set_cached(email, data)
+        return data
 
     local, domain = email.split("@", 1)
     domain = domain.lower()
 
-    # -----------------------------------------------------
+    # -----------------------------------------
     # 3) MX LOOKUP
-    # -----------------------------------------------------
+    # -----------------------------------------
     mx_hosts = choose_mx_for_domain(domain)
     if not mx_hosts:
-        result = {
+        data = {
             "email": email,
             "status": "invalid",
             "reason": "no_mx"
         }
-        set_cached(email, result)
+        set_cached(email, data)
         record_domain_result(domain, False)
-        return result
+        return data
 
-    # -----------------------------------------------------
-    # 4) RESPECT DOMAIN BACKOFF
-    # -----------------------------------------------------
+    # -----------------------------------------
+    # 4) DOMAIN BACKOFF RESPECT
+    # -----------------------------------------
     backoff_sec = get_backoff_seconds(domain)
     if backoff_sec > 0:
         await asyncio.sleep(min(backoff_sec, 8))
 
-    # -----------------------------------------------------
-    # 5) DOMAIN SLOT ACQUIRE (parallel limiter)
-    # -----------------------------------------------------
+    # -----------------------------------------
+    # 5) CONCURRENCY SLOT ACQUIRE
+    # -----------------------------------------
     if not acquire_slot(domain):
-        # Domain overloaded → temporary
+        # High load on domain (greylisting defense)
         return {
             "email": email,
             "status": "unknown",
             "reason": "domain_slots_full"
         }
 
-    # -----------------------------------------------------
+    # -----------------------------------------
     # 6) SMTP PROBE
-    # -----------------------------------------------------
+    # -----------------------------------------
     try:
-        smtp_res = await smtp_probe(email, mx_hosts)
+        smtp_res = await smtp_probe(email, domain, mx_hosts)
     except Exception as e:
-        logger.exception("SMTP probe failure: %s", e)
+        logger.exception("SMTP probe failed: %s", e)
         smtp_res = {
             "email": email,
             "status": "error",
@@ -126,44 +125,45 @@ async def verify_email_async(
     finally:
         release_slot(domain)
 
-    # -----------------------------------------------------
-    # 7) SCORING ENGINE (status + risk_score)
-    # -----------------------------------------------------
-    scored = score_verification(smtp_res)  # returns dict {status, risk_score, details, ...}
+    # -----------------------------------------
+    # 7) SCORING ENGINE
+    # -----------------------------------------
+    scored = score_verification(smtp_res)
 
-    # -----------------------------------------------------
+    # -----------------------------------------
     # 8) DELIVERABILITY TRACKING
-    # -----------------------------------------------------
+    # -----------------------------------------
     try:
-        is_valid = scored.get("status") == "valid"
-        record_domain_result(domain, is_valid)
+        good = scored.get("status") == "valid"
+        record_domain_result(domain, good)
     except Exception:
         pass
 
-    # -----------------------------------------------------
+    # -----------------------------------------
     # 9) DOMAIN REPUTATION SCORE
-    # -----------------------------------------------------
+    # -----------------------------------------
     try:
         mx_used = smtp_res.get("mx_host")
-        scored["domain_reputation"] = compute_domain_score(domain, mx_used)
+        domain_rep = compute_domain_score(domain, mx_used)
+        scored["domain_reputation"] = domain_rep
     except Exception:
         scored["domain_reputation"] = None
 
-    # -----------------------------------------------------
-    # 10) STORE IN CACHE
-    # -----------------------------------------------------
+    # -----------------------------------------
+    # 10) CACHE SAVE
+    # -----------------------------------------
     set_cached(email, scored)
 
-    # -----------------------------------------------------
-    # 11) PERSIST RESULT IN DATABASE
-    # -----------------------------------------------------
+    # -----------------------------------------
+    # 11) DATABASE PERSISTENCE
+    # -----------------------------------------
     db = SessionLocal()
     try:
         vr = VerificationResult(
             user_id=user_id,
             job_id=None,
             email=email,
-            status=scored.get("status", "unknown"),
+            status=scored.get("status"),
             risk_score=int(scored.get("risk_score", 50)),
             raw=json.dumps(scored),
             cached=False,
@@ -179,9 +179,14 @@ async def verify_email_async(
 
 
 # ---------------------------------------------------------
-# SYNC WRAPPER (used by routers + bulk processor)
+# SYNC WRAPPER (for routers, bulk processor)
 # ---------------------------------------------------------
 
 def verify_email_sync(email: str, user_id: int | None = None) -> Dict[str, Any]:
-    """Run async verification in sync mode."""
-    return asyncio.run(verify_email_async(email, user_id))
+    """Run async verifier in sync mode safely."""
+    try:
+        return asyncio.run(verify_email_async(email, user_id))
+    except RuntimeError:
+        # event loop already running (e.g. inside async worker)
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(verify_email_async(email, user_id))
