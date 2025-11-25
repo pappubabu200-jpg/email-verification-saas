@@ -1,53 +1,140 @@
 import re
 from typing import List, Optional
 
-# Basic list of known spamtrap domains / role accounts (extend over time)
+# -----------------------------------------------------------
+# Known spamtrap / disposable domains (extend your list here)
+# -----------------------------------------------------------
+
 KNOWN_SPAMTRAP_DOMAINS = {
-    "spamtrap.example",  # replace with real known lists if you have them
+    "spamtrap.example",
+    "roottrap.example",
+    "seedlist.example",
 }
 
-ROLE_ACCOUNT_KEYWORDS = [
-    "admin", "administrator", "postmaster", "abuse", "no-reply", "noreply", "support", "info", "sales"
+DISPOSABLE_PATTERNS = [
+    r"mailinator",
+    r"10minutemail",
+    r"tempmail",
+    r"guerrillamail",
+    r"trashmail",
+    r"yopmail",
+    r"dispostable",
+    r"getnada",
+    r"fakeinbox",
+    r"throwawaymail",
+    r"sharklasers",
 ]
 
-def _is_role_account(local_part: str) -> bool:
-    lp = (local_part or "").lower()
+# -----------------------------------------------------------
+# Role account detection — high bounce + low engagement
+# -----------------------------------------------------------
+
+ROLE_ACCOUNT_KEYWORDS = [
+    "admin", "administrator", "postmaster", "root",
+    "abuse", "support", "helpdesk", "info", "sales",
+    "billing", "contact", "office", "team",
+    "no-reply", "noreply", "donotreply",
+]
+
+
+def _is_role_account(local: str) -> bool:
+    """
+    Detects addresses like:
+    - admin@example.com
+    - support@example.com
+    - info+abc@example.com
+    """
+    lp = (local or "").lower()
+
     for kw in ROLE_ACCOUNT_KEYWORDS:
-        if lp == kw or lp.startswith(kw + "+") or lp.startswith(kw + ".") or lp.startswith(kw + "-"):
+        # Exact match (most important)
+        if lp == kw:
             return True
-        if lp.find(kw) != -1 and len(lp) <= (len(kw) + 8):
-            # short matches like admin1, admin2 — treat as role-like
+
+        # Variants: support+tag, admin.test, info-xyz
+        if lp.startswith(f"{kw}+") or lp.startswith(f"{kw}.") or lp.startswith(f"{kw}-"):
             return True
+
+        # Partial match for short variants (admin1, abuse2)
+        if lp.startswith(kw) and len(lp) <= len(kw) + 2:
+            return True
+
     return False
+
+
+# -----------------------------------------------------------
+# Domain spamtrap detection
+# -----------------------------------------------------------
 
 def _domain_is_spamtrap(domain: str) -> bool:
     if not domain:
         return False
-    d = domain.lower()
-    if d in KNOWN_SPAMTRAP_DOMAINS:
+
+    domain = domain.lower()
+
+    # Direct block list (manual)
+    if domain in KNOWN_SPAMTRAP_DOMAINS:
         return True
-    # common disposable patterns
-    if re.search(r"trashmail|tempmail|mailinator|10minutemail|disposable", d):
+
+    # Check disposable / high-risk patterns
+    for p in DISPOSABLE_PATTERNS:
+        if re.search(p, domain):
+            return True
+
+    # Common spam-service patterns
+    if re.search(r"(spm|trap|blocklist|blackhole)", domain):
         return True
+
     return False
+
+
+# -----------------------------------------------------------
+# Main spam checker
+# -----------------------------------------------------------
 
 def spam_checks(email: str, smtp_response: Optional[str] = None) -> List[str]:
     """
-    Return a list of spam flags.
+    Returns list of spam flags:
+        - role_account
+        - known_spamtrap_domain
+        - disposable_domain
+        - smtp_spam_hint
+        - suspicious_format
     """
     flags = []
-    if not email:
+
+    if not email or "@" not in email:
         return flags
-    parts = email.split("@")
-    local = parts[0] if len(parts) == 2 else ""
-    domain = parts[1] if len(parts) == 2 else ""
+
+    local, domain = email.split("@", 1)
+
+    # 1. Role account detection
     if _is_role_account(local):
         flags.append("role_account")
+
+    # 2. Spamtrap or disposable domain
     if _domain_is_spamtrap(domain):
         flags.append("known_spamtrap_domain")
-    # check smtp response text for spamtrap hints
+
+        # More granular flag
+        for p in DISPOSABLE_PATTERNS:
+            if re.search(p, domain):
+                flags.append("disposable_domain")
+                break
+
+    # 3. SMTP response hints
     if smtp_response:
-        tr = smtp_response.lower()
-        if "spamtrap" in tr or "spam" in tr:
+        txt = smtp_response.lower()
+
+        if "spamtrap" in txt:
+            flags.append("smtp_spamtrap_hint")
+        if "spam" in txt or "listed" in txt or "block" in txt:
             flags.append("smtp_spam_hint")
+
+    # 4. Suspicious local-part format
+    if re.match(r"^[a-z0-9]{1,4}$", local):  # too short
+        flags.append("suspicious_format")
+    if re.search(r"\.\.|--|__", local):  # repeated separators
+        flags.append("suspicious_format")
+
     return flags
