@@ -1,72 +1,141 @@
+# backend/app/services/deliverability_monitor.py
+
+import json
 import logging
 from typing import Dict, Optional
 
-try:
-    import redis
-    REDIS = redis.from_url("redis://redis:6379/0")
-except Exception:
-    REDIS = None
-
+from backend.app.config import settings
 from backend.app.services.ip_intelligence import get_mx_ip_info
 
 logger = logging.getLogger(__name__)
 
-# Keys and scoring rules
-DOMAIN_REPUTATION_KEY = "domain:reputation:{}"  # domain -> JSON object (score, last_updated)
+# ---------------------------------------------
+# REDIS INITIALIZATION
+# ---------------------------------------------
+
+try:
+    import redis
+    REDIS = redis.from_url(settings.REDIS_URL)
+except Exception:
+    REDIS = None  # full graceful fallback
 
 
-def compute_domain_score(domain: str, mx_host: Optional[str] = None) -> Dict:
-    """
-    Compute a domain reputation score combining:
-     - MX IP score
-     - historical positives/negatives from Redis counters (if available)
-    Returns: {domain, score, breakdown}
-    """
-    breakdown = {}
-    score = 50  # baseline
+# ---------------------------------------------
+# KEYS
+# ---------------------------------------------
 
-    if mx_host:
-        ip_info = get_mx_ip_info(mx_host)
-        breakdown["mx_ip_score"] = ip_info.get("score", 50)
-        score = int((score + ip_info.get("score", 50)) / 2)
+DOMAIN_REPUTATION_KEY = "domain:reputation:{}"     # stores JSON
+GOOD_KEY = "domain:{}:good"
+BAD_KEY = "domain:{}:bad"
 
-    # historical metrics (if Redis available)
-    if REDIS:
-        try:
-            good = int(REDIS.get(f"domain:{domain}:good") or 0)
-            bad = int(REDIS.get(f"domain:{domain}:bad") or 0)
-            total = good + bad
-            breakdown["historical_good"] = good
-            breakdown["historical_bad"] = bad
-            if total > 0:
-                ratio = good / total
-                hist_score = int(ratio * 100)
-                score = int((score + hist_score) / 2)
-                breakdown["historical_score"] = hist_score
-        except Exception as e:
-            logger.debug("deliverability_monitor: redis read error %s", e)
+REPUTATION_CACHE_TTL = 86400   # 24 hours (optional)
 
-    result = {"domain": domain, "score": int(score), "breakdown": breakdown}
-    # Save to redis for quick access
-    if REDIS:
-        try:
-            REDIS.set(DOMAIN_REPUTATION_KEY.format(domain), str(result))
-        except Exception:
-            pass
-    return result
 
+# ---------------------------------------------
+# RECORD DOMAIN HISTORY
+# ---------------------------------------------
 
 def record_domain_result(domain: str, success: bool):
     """
-    Call this after each verification to update historical counters.
-    success=True increments good, else increments bad.
+    Increment historical counters.
     """
     if not REDIS:
         return
+
     try:
         if success:
-            REDIS.incr(f"domain:{domain}:good")
+            REDIS.incr(GOOD_KEY.format(domain))
         else:
-            REDIS.incr(f"domain:{domain}:bad")
+            REDIS.incr(BAD_KEY.format(domain))
     except Exception:
+        # NEVER break main verification flow
         pass
+
+
+# ---------------------------------------------
+# COMPUTE DOMAIN REPUTATION SCORE
+# ---------------------------------------------
+
+def compute_domain_score(domain: str, mx_host: Optional[str] = None) -> Dict:
+    """
+    Compute a reputation score from:
+
+    - MX IP trust score
+    - Historical good/bad ratio
+    - Weighted average against baseline (50)
+
+    Returns:
+        {
+          "domain": "gmail.com",
+          "score": 87,
+          "breakdown": { ... }
+        }
+    """
+
+    score = 50  # baseline
+    breakdown = {}
+
+    # -----------------------------
+    # MX IP SCORE
+    # -----------------------------
+    try:
+        if mx_host:
+            ip_info = get_mx_ip_info(mx_host) or {}
+            ip_score = int(ip_info.get("score", 50))   # default 50
+
+            breakdown["mx_ip_info"] = ip_info
+            breakdown["mx_ip_score"] = ip_score
+
+            # Weighted merge (MX weight = 0.6)
+            score = int((score * 0.4) + (ip_score * 0.6))
+    except Exception as e:
+        logger.debug("compute_domain_score: mx_ip failed %s", e)
+
+    # -----------------------------
+    # HISTORICAL GOOD/BAD SIGNALS
+    # -----------------------------
+    if REDIS:
+        try:
+            good_raw = REDIS.get(GOOD_KEY.format(domain))
+            bad_raw = REDIS.get(BAD_KEY.format(domain))
+
+            good = int(good_raw.decode() if good_raw else 0)
+            bad = int(bad_raw.decode() if bad_raw else 0)
+
+            breakdown["historical_good"] = good
+            breakdown["historical_bad"] = bad
+
+            total = good + bad
+            if total > 0:
+                ratio = good / total
+                hist_score = int(ratio * 100)
+
+                breakdown["historical_score"] = hist_score
+
+                # Weighted merge (History weight = 0.5)
+                score = int((score * 0.5) + (hist_score * 0.5))
+
+        except Exception as e:
+            logger.debug("compute_domain_score: redis read error %s", e)
+
+    # -----------------------------
+    # FINAL RESULT OBJECT
+    # -----------------------------
+    result = {
+        "domain": domain,
+        "score": int(max(0, min(100, score))),  # clamp between 0–100
+        "breakdown": breakdown,
+    }
+
+    # Save cache for UI preview / API response
+    if REDIS:
+        try:
+            REDIS.set(
+                DOMAIN_REPUTATION_KEY.format(domain),
+                json.dumps(result),
+                ex=REPUTATION_CACHE_TTL
+            )
+        except Exception:
+            pass
+
+    return result
