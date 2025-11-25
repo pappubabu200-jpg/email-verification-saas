@@ -1,5 +1,11 @@
 # backend/app/services/domain_backoff.py
 
+"""
+Domain-level exponential backoff system.
+Used when an SMTP server returns temporary (4xx) errors.
+Prevents hammering a throttled domain.
+"""
+
 import logging
 import time
 from backend.app.config import settings
@@ -8,76 +14,27 @@ try:
     import redis
     REDIS = redis.from_url(settings.REDIS_URL)
 except Exception:
-    REDIS = None  # graceful fallback
+    REDIS = None
 
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------
+# ---------------------------
 # CONFIG
-# --------------------------------------------
-
-DEFAULT_DOMAIN_SLOTS = int(getattr(settings, "DOMAIN_CONCURRENCY", 2))
-SLOT_TTL = int(getattr(settings, "DOMAIN_SLOT_TTL", 60))  # seconds
-BACKOFF_KEY = "domain:backoff:{}"        # domain → backoff seconds
-SLOT_KEY = "domain:slots:{}"             # domain → current active slots
+# ---------------------------
+BACKOFF_KEY = "domain:backoff:{}"
+BASE_BACKOFF = int(getattr(settings, "BACKOFF_BASE", 5))     # seconds
+BACKOFF_CAP = int(getattr(settings, "BACKOFF_CAP", 300))     # max 5 minutes
 
 
-# --------------------------------------------
-# DOMAIN CONCURRENCY CONTROL
-# --------------------------------------------
-
-def acquire_slot(domain: str) -> bool:
-    """
-    Redis-based concurrency limiting.
-    Allows N parallel SMTP probes per domain.
-    """
-    if REDIS is None:
-        return True  # fallback: allow everything
-
-    try:
-        key = SLOT_KEY.format(domain)
-        cur = REDIS.incr(key)
-
-        if cur == 1:
-            REDIS.expire(key, SLOT_TTL)
-
-        max_slots = int(getattr(settings, "DOMAIN_CONCURRENCY", DEFAULT_DOMAIN_SLOTS))
-
-        if cur <= max_slots:
-            return True
-
-        # rejected → rollback
-        REDIS.decr(key)
-        return False
-
-    except Exception as e:
-        logger.debug("acquire_slot error: %s", e)
-        return True  # safe fallback
-
-
-def release_slot(domain: str):
-    """
-    Release domain slot after SMTP probe.
-    """
-    if REDIS is None:
-        return
-
-    try:
-        key = SLOT_KEY.format(domain)
-        cur = REDIS.decr(key)
-        if cur <= 0:
-            REDIS.delete(key)
-    except Exception:
-        pass
-
-
-# --------------------------------------------
-# DOMAIN BACKOFF SYSTEM
-# --------------------------------------------
+# ---------------------------
+# READ CURRENT BACKOFF
+# ---------------------------
 
 def get_backoff_seconds(domain: str) -> int:
     """
-    Read current backoff window for domain.
+    Return the remaining backoff time for the domain.
+    Redis: store TTL as actual delay.
+    Memory fallback: always returns 0 (disabled).
     """
     if REDIS is None:
         return 0
@@ -91,10 +48,14 @@ def get_backoff_seconds(domain: str) -> int:
         return 0
 
 
-def increase_backoff(domain: str, base: int = 5, cap: int = 300):
+# ---------------------------
+# INCREASE BACKOFF
+# ---------------------------
+
+def increase_backoff(domain: str):
     """
-    Exponential backoff:
-    Increase domain wait time on temp errors (4xx)
+    Increase backoff duration using exponential growth.
+    Only used on temporary/greylist/timeout errors.
     """
     if REDIS is None:
         return
@@ -103,16 +64,23 @@ def increase_backoff(domain: str, base: int = 5, cap: int = 300):
         key = BACKOFF_KEY.format(domain)
         cur = REDIS.incr(key)
 
-        ttl = min(cap, base * (2 ** (int(cur) - 1)))
-        REDIS.expire(key, ttl)
+        # Exponential delay
+        delay = min(BACKOFF_CAP, BASE_BACKOFF * (2 ** (int(cur) - 1)))
+
+        # Expire after delay seconds
+        REDIS.expire(key, delay)
 
     except Exception:
         pass
 
 
+# ---------------------------
+# CLEAR BACKOFF
+# ---------------------------
+
 def clear_backoff(domain: str):
     """
-    Remove domain backoff entirely.
+    Reset backoff completely after successful validations.
     """
     if REDIS is None:
         return
