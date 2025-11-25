@@ -1,58 +1,92 @@
 # backend/app/tasks/bulk_tasks.py
-import logging
-from decimal import Decimal, InvalidOperation
-from typing import Union, Optional
+"""
+Celery tasks for bulk job processing.
 
-from celery.utils.log import get_task_logger
+- process_bulk_job_task: main worker entry (delegates to services.bulk_processor.process_bulk_job)
+- safe: loads job record, marks job status, captures exceptions and updates DB
+- idempotent-ish: looks up job by job_id and will not re-run if already completed.
+"""
+
+from __future__ import annotations
+
+import logging
+from decimal import Decimal
+from typing import Any, Optional
 
 from backend.app.celery_app import celery_app
+from backend.app.db import SessionLocal
+from backend.app.models.bulk_job import BulkJob
+
 from backend.app.services.bulk_processor import process_bulk_job
 
-logger = get_task_logger(__name__)
-logger.setLevel(logging.INFO)
+logger = logging.getLogger(__name__)
 
-@celery_app.task(
-    bind=True,
-    name="backend.app.tasks.bulk_tasks.process_bulk_job_task",
-    max_retries=3,
-    default_retry_delay=30,   # seconds
-    acks_late=True,
-    time_limit=60*60*2,       # 2 hours per bulk job (tune as needed)
-)
-def process_bulk_job_task(self, job_id: str, estimated_cost: Union[str, float, int, None] = None):
+@celery_app.task(bind=True, name="backend.app.tasks.bulk_tasks.process_bulk_job_task", acks_late=True, autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={"max_retries": 3})
+def process_bulk_job_task(self, job_id: str, estimated_cost: float = 0.0) -> dict:
     """
-    Celery entrypoint for processing a bulk job.
+    Celery task wrapper for processing bulk verification job.
 
-    Args:
-        job_id: str - unique job identifier as stored in DB (BulkJob.job_id)
-        estimated_cost: Decimal/float/str - estimated cost reserved for the job (optional)
+    Parameters
+    ----------
+    job_id: str
+        The unique job identifier matching BulkJob.job_id
+    estimated_cost: float
+        Credits reserved for the job (for refund math). Pass as float or decimal-compatible.
+
+    Behavior
+    - Checks DB job status and prevents double-processing when already 'completed' or 'running' (idempotency guard)
+    - Calls process_bulk_job(job_id, Decimal(estimated_cost)) which is synchronous and safe for Celery
+    - Updates job.status on unexpected failures (best-effort)
     """
+    db = SessionLocal()
+    try:
+        job = db.query(BulkJob).filter(BulkJob.job_id == job_id).with_for_update(read=True).first()
+        if not job:
+            logger.error("Celery bulk task: job not found: %s", job_id)
+            return {"ok": False, "reason": "job_not_found", "job_id": job_id}
 
-    # Validate inputs
-    if not job_id:
-        logger.error("process_bulk_job_task called without job_id")
-        return {"ok": False, "error": "missing_job_id"}
+        # Idempotency guard: if job already completed/processing, skip or re-run based on policy
+        if job.status in ("running", "completed"):
+            logger.info("Celery bulk task: job already in state %s: %s", job.status, job_id)
+            return {"ok": True, "info": f"already_{job.status}", "job_id": job_id}
 
-    # Convert estimated_cost to Decimal
-    est = Decimal("0")
-    if estimated_cost is not None:
+        # Mark job running (best-effort)
+        try:
+            job.status = "running"
+            db.add(job)
+            db.commit()
+            db.refresh(job)
+        except Exception as e:
+            logger.debug("Failed to mark job running: %s", e)
+            # continue anyway
+
+        # Convert estimated_cost to Decimal
         try:
             est = Decimal(str(estimated_cost))
-        except (InvalidOperation, TypeError):
-            logger.warning("Invalid estimated_cost %s for job %s - using 0", estimated_cost, job_id)
+        except Exception:
             est = Decimal("0")
 
-    try:
-        logger.info("Starting bulk job worker for job_id=%s estimated_cost=%s", job_id, est)
-        # process_bulk_job is synchronous (designed to be called from worker)
-        process_bulk_job(job_id, est)
-        logger.info("Finished bulk job worker for job_id=%s", job_id)
-        return {"ok": True, "job_id": job_id}
-    except Exception as exc:
-        logger.exception("process_bulk_job_task failed for job_id=%s: %s", job_id, exc)
+        # Call the heavy processor (synchronous)
         try:
-            # retry with exponential backoff
-            raise self.retry(exc=exc)
-        except Exception as retry_exc:
-            logger.debug("Retry raised: %s", retry_exc)
-        return {"ok": False, "error": str(exc)}
+            process_bulk_job(job_id, est)
+            return {"ok": True, "job_id": job_id}
+        except Exception as exc:
+            logger.exception("process_bulk_job_task failed for %s: %s", job_id, exc)
+            # Update job status to 'failed' in DB (best-effort)
+            try:
+                j2 = db.query(BulkJob).filter(BulkJob.job_id == job_id).first()
+                if j2:
+                    j2.status = "failed"
+                    j2.error_message = str(exc)[:2000]
+                    db.add(j2)
+                    db.commit()
+            except Exception:
+                logger.exception("Failed to update job status after exception")
+            # Let Celery handle retries if configured (this task is configured to autoretry)
+            raise
+
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
