@@ -63,6 +63,11 @@ def create_app() -> FastAPI:
     # ---------------------
 # Middleware (load in correct order)
 # ---------------------
+# ---------------------
+# Middleware (Correct Order)
+# ---------------------
+
+# 1. Request Logger (first layer – logs EVERY request)
 try:
     from backend.app.middleware.request_logger import RequestLoggerMiddleware
     app.add_middleware(RequestLoggerMiddleware)
@@ -70,6 +75,7 @@ try:
 except Exception as e:
     logger.debug(f"RequestLoggerMiddleware missing: {e}")
 
+# 2. Audit Middleware (second layer – logs to DB)
 try:
     from backend.app.middleware.audit_middleware import AuditMiddleware
     app.add_middleware(AuditMiddleware)
@@ -77,6 +83,7 @@ try:
 except Exception as e:
     logger.debug(f"AuditMiddleware missing: {e}")
 
+# 3. API Key Guard (protect API key routes)
 try:
     from backend.app.middleware.api_key_guard import APIKeyGuardMiddleware
     app.add_middleware(APIKeyGuardMiddleware)
@@ -84,6 +91,7 @@ try:
 except Exception as e:
     logger.debug(f"APIKeyGuardMiddleware missing: {e}")
 
+# 4. Team Context (loads team info into request.state)
 try:
     from backend.app.middleware.team_context import TeamContextMiddleware
     app.add_middleware(TeamContextMiddleware)
@@ -91,6 +99,7 @@ try:
 except Exception as e:
     logger.debug(f"TeamContextMiddleware missing: {e}")
 
+# 5. Team ACL (permissions)
 try:
     from backend.app.middleware.team_acl import TeamACL
     app.add_middleware(TeamACL)
@@ -98,6 +107,7 @@ try:
 except Exception as e:
     logger.debug(f"TeamACL missing: {e}")
 
+# 6. Rate Limiter (last – throttling + quotas)
 try:
     from backend.app.middleware.rate_limiter import RateLimiterMiddleware
     app.add_middleware(RateLimiterMiddleware)
