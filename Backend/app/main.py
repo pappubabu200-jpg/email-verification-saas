@@ -1,4 +1,4 @@
-ok# backend/app/main.py
+# backend/app/main.py
 """
 Clean, production-ready FastAPI application entrypoint.
 
@@ -59,29 +59,52 @@ def create_app() -> FastAPI:
 
     # ---------------------
     # Conditional Middleware
-    # Add middleware only if available in project
+    # 
     # ---------------------
-    try:
-        ApiKeyGuard = getattr(importlib.import_module("backend.app.middleware.api_key_guard"), "ApiKeyGuard")
-        app.add_middleware(ApiKeyGuard)
-        logger.info("ApiKeyGuard middleware added")
-    except Exception:
-        logger.debug("ApiKeyGuard middleware not found or failed to import")
+# Middleware (load in correct order)
+# ---------------------
+try:
+    from backend.app.middleware.request_logger import RequestLoggerMiddleware
+    app.add_middleware(RequestLoggerMiddleware)
+    logger.info("RequestLoggerMiddleware added")
+except Exception as e:
+    logger.debug(f"RequestLoggerMiddleware missing: {e}")
 
-    try:
-        TeamContextMiddleware = getattr(importlib.import_module("backend.app.middleware.team_context"), "TeamContextMiddleware")
-        app.add_middleware(TeamContextMiddleware)
-        logger.info("TeamContextMiddleware added")
-    except Exception:
-        logger.debug("TeamContextMiddleware not found or failed to import")
+try:
+    from backend.app.middleware.audit_middleware import AuditMiddleware
+    app.add_middleware(AuditMiddleware)
+    logger.info("AuditMiddleware added")
+except Exception as e:
+    logger.debug(f"AuditMiddleware missing: {e}")
 
-    try:
-        TeamACL = getattr(importlib.import_module("backend.app.middleware.team_acl"), "TeamACL")
-        app.add_middleware(TeamACL)
-        logger.info("TeamACL middleware added")
-    except Exception:
-        logger.debug("TeamACL middleware not found or failed to import")
+try:
+    from backend.app.middleware.api_key_guard import APIKeyGuardMiddleware
+    app.add_middleware(APIKeyGuardMiddleware)
+    logger.info("APIKeyGuardMiddleware added")
+except Exception as e:
+    logger.debug(f"APIKeyGuardMiddleware missing: {e}")
 
+try:
+    from backend.app.middleware.team_context import TeamContextMiddleware
+    app.add_middleware(TeamContextMiddleware)
+    logger.info("TeamContextMiddleware added")
+except Exception as e:
+    logger.debug(f"TeamContextMiddleware missing: {e}")
+
+try:
+    from backend.app.middleware.team_acl import TeamACL
+    app.add_middleware(TeamACL)
+    logger.info("TeamACL middleware added")
+except Exception as e:
+    logger.debug(f"TeamACL missing: {e}")
+
+try:
+    from backend.app.middleware.rate_limiter import RateLimiterMiddleware
+    app.add_middleware(RateLimiterMiddleware)
+    logger.info("RateLimiterMiddleware added")
+except Exception as e:
+    logger.debug(f"RateLimiterMiddleware missing: {e}")
+    
     # ---------------------
     # Conditional Router Inclusion
     # Provide a list of candidate router module paths (project may contain some or all)
