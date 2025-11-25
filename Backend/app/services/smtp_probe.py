@@ -10,7 +10,9 @@ Design:
  - Always release domain throttle slot when acquired
  - Minimal logging and no leaking of full PII into logs
 """
-
+# new imports (near top)
+from prometheus_client import Counter, Histogram, Gauge  # ensure prometheus_client is installed
+from backend.app.services.domain_throttle import acquire, release, try_consume_tokens, acquire_slot_async, release_slot_async
 import asyncio
 import smtplib
 import socket
