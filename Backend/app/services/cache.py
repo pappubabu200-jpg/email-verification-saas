@@ -1,52 +1,76 @@
+# backend/app/services/cache.py
+
 import json
 import threading
 from typing import Optional, Dict, Any
 
 from backend.app.config import settings
 
+# -----------------------------------------------------------------------------
+# REDIS INITIALIZATION
+# -----------------------------------------------------------------------------
 try:
     import redis as _redis  # type: ignore
+    REDIS = _redis.from_url(settings.REDIS_URL) if settings.REDIS_URL else None
 except Exception:
-    _redis = None
+    REDIS = None  # graceful fallback
 
-# In-memory fallback (thread-safe)
+
+# -----------------------------------------------------------------------------
+# IN-MEMORY FALLBACK (THREAD-SAFE)
+# -----------------------------------------------------------------------------
 _in_memory_cache: Dict[str, Any] = {}
 _lock = threading.Lock()
+_IN_MEMORY_MAX = 10_000  # prevents unbounded RAM usage
+
 
 def cache_key(email: str) -> str:
     return f"verification:result:{email.lower()}"
 
+
+# -----------------------------------------------------------------------------
+# GET
+# -----------------------------------------------------------------------------
 def get_cached(email: str) -> Optional[Dict]:
     key = cache_key(email)
-    # try redis first
-    if _redis and settings.REDIS_URL:
+
+    # ---- Redis Fast Path ----
+    if REDIS:
         try:
-            r = _redis.from_url(settings.REDIS_URL)
-            v = r.get(key)
-            if v:
+            raw = REDIS.get(key)
+            if raw:
                 try:
-                    return json.loads(v)
+                    return json.loads(raw)
                 except Exception:
                     return None
         except Exception:
             pass
 
-    # fallback to in-memory
+    # ---- In-Memory Fallback ----
     with _lock:
-        val = _in_memory_cache.get(key)
-        return val
+        return _in_memory_cache.get(key)
 
+
+# -----------------------------------------------------------------------------
+# SET
+# -----------------------------------------------------------------------------
 def set_cached(email: str, payload: Dict, ttl: Optional[int] = None) -> bool:
     key = cache_key(email)
-    ttl = ttl or settings.VERIFICATION_CACHE_TTL
-    if _redis and settings.REDIS_URL:
+    ttl = ttl or getattr(settings, "VERIFICATION_CACHE_TTL", 300)
+
+    # ---- Redis Preferred ----
+    if REDIS:
         try:
-            r = _redis.from_url(settings.REDIS_URL)
-            r.setex(key, ttl, json.dumps(payload))
+            REDIS.setex(key, ttl, json.dumps(payload))
             return True
         except Exception:
             pass
 
+    # ---- In-Memory Fallback ----
     with _lock:
+        if len(_in_memory_cache) >= _IN_MEMORY_MAX:
+            # remove 1st inserted key (simple eviction)
+            _in_memory_cache.pop(next(iter(_in_memory_cache)), None)
         _in_memory_cache[key] = payload
+
     return True
