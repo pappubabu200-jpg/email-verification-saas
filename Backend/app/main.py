@@ -58,16 +58,19 @@ def create_app() -> FastAPI:
     )
 
     # ---------------------
-    # Conditional Middleware
-    # 
-    # ---------------------
-# Middleware (load in correct order)
-# ---------------------
-# ---------------------
-# Middleware (Correct Order)
-# ---------------------
+# -------------------------------
+# Middleware (Final Production Order)
+# -------------------------------
 
-# 1. Request Logger (first layer – logs EVERY request)
+# 0. CORS (must be FIRST)
+try:
+    from backend.app.middleware.cors import add_cors
+    add_cors(app)
+    logger.info("CORS middleware added")
+except Exception as e:
+    logger.debug(f"CORS middleware missing or failed: {e}")
+
+# 1. Request Logger (logs every request)
 try:
     from backend.app.middleware.request_logger import RequestLoggerMiddleware
     app.add_middleware(RequestLoggerMiddleware)
@@ -75,7 +78,7 @@ try:
 except Exception as e:
     logger.debug(f"RequestLoggerMiddleware missing: {e}")
 
-# 2. Audit Middleware (second layer – logs to DB)
+# 2. Audit Middleware (writes logs to DB – must run after logger)
 try:
     from backend.app.middleware.audit_middleware import AuditMiddleware
     app.add_middleware(AuditMiddleware)
@@ -83,7 +86,7 @@ try:
 except Exception as e:
     logger.debug(f"AuditMiddleware missing: {e}")
 
-# 3. API Key Guard (protect API key routes)
+# 3. API Key Guard (API key authentication)
 try:
     from backend.app.middleware.api_key_guard import APIKeyGuardMiddleware
     app.add_middleware(APIKeyGuardMiddleware)
@@ -91,7 +94,7 @@ try:
 except Exception as e:
     logger.debug(f"APIKeyGuardMiddleware missing: {e}")
 
-# 4. Team Context (loads team info into request.state)
+# 4. Team Context (sets request.state.team and team_id)
 try:
     from backend.app.middleware.team_context import TeamContextMiddleware
     app.add_middleware(TeamContextMiddleware)
@@ -99,15 +102,15 @@ try:
 except Exception as e:
     logger.debug(f"TeamContextMiddleware missing: {e}")
 
-# 5. Team ACL (permissions)
+# 5. Team ACL (permissions: owner/admin/member/billing/viewer)
 try:
     from backend.app.middleware.team_acl import TeamACL
     app.add_middleware(TeamACL)
-    logger.info("TeamACL middleware added")
+    logger.info("TeamACL added")
 except Exception as e:
     logger.debug(f"TeamACL missing: {e}")
 
-# 6. Rate Limiter (last – throttling + quotas)
+# 6. Rate Limiter (final layer – throttling)
 try:
     from backend.app.middleware.rate_limiter import RateLimiterMiddleware
     app.add_middleware(RateLimiterMiddleware)
@@ -115,6 +118,8 @@ try:
 except Exception as e:
     logger.debug(f"RateLimiterMiddleware missing: {e}")
     
+
+
     # ---------------------
     # Conditional Router Inclusion
     # Provide a list of candidate router module paths (project may contain some or all)
