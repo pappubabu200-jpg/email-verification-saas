@@ -134,3 +134,178 @@ volumes:
       worker:
     command: celery -A backend.app.celery_app.celery_app worker \
              --loglevel=info --queues=default,bulk_jobs,webhooks --concurrency=4
+             version: "3.8"
+
+x-default-restarts: &default-restarts
+  restart: unless-stopped
+  deploy:
+    restart_policy:
+      condition: on-failure
+      delay: 5s
+      max_attempts: 5
+      window: 120s
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: evs_postgres
+    env_file:
+      - ./backend/.env.prod
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-svcuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-svcpass}
+      POSTGRES_DB: ${POSTGRES_DB:-emailsaas}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h 127.0.0.1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks:
+      - evs-net
+    <<: *default-restarts
+
+  redis:
+    image: redis:7-alpine
+    container_name: evs_redis
+    command: ["redis-server", "--save", "60", "1"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks:
+      - evs-net
+    <<: *default-restarts
+
+  minio:
+    image: minio/minio:RELEASE.2025-01-01T00-00-00Z
+    container_name: evs_minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data
+    volumes:
+      - miniodata:/data
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live || exit 1"]
+      interval: 30s
+      retries: 3
+    networks:
+      - evs-net
+    <<: *default-restarts
+
+  web:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: evs_web
+    env_file:
+      - ./backend/.env.prod
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    volumes:
+      - ./backend:/usr/src/app/backend:ro
+    command: ["sh", "-c", "uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --workers 4 --loop uvloop"]
+    networks:
+      - evs-net
+    <<: *default-restarts
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: evs_worker
+    env_file:
+      - ./backend/.env.prod
+    depends_on:
+      - redis
+      - postgres
+      - web
+    command: ["sh", "-c", "celery -A backend.app.celery_app.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-4}"]
+    volumes:
+      - ./backend:/usr/src/app/backend:ro
+    networks:
+      - evs-net
+    <<: *default-restarts
+
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: evs_beat
+    env_file:
+      - ./backend/.env.prod
+    depends_on:
+      - redis
+      - postgres
+    command: ["sh", "-c", "celery -A backend.app.celery_app.celery_app beat --loglevel=info"]
+    volumes:
+      - ./backend:/usr/src/app/backend:ro
+    networks:
+      - evs-net
+    <<: *default-restarts
+
+  flower:
+    image: mher/flower
+    container_name: evs_flower
+    command: ["sh", "-c", "flower --broker=${CELERY_BROKER_URL:-redis://redis:6379/1} --port=5555"]
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/1}
+    depends_on:
+      - redis
+    networks:
+      - evs-net
+    <<: *default-restarts
+
+  nginx:
+    image: nginx:stable-alpine
+    container_name: evs_nginx
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - web
+    networks:
+      - evs-net
+    <<: *default-restarts
+
+  # Optional: certbot for Let's Encrypt (comment/uncomment if you want auto TLS)
+  certbot:
+    image: certbot/certbot
+    container_name: evs_certbot
+    volumes:
+      - ./deploy/letsencrypt:/etc/letsencrypt
+    entrypoint: ["/bin/sh", "-c"]
+    command: "sleep 3600"
+    networks:
+      - evs-net
+    <<: *default-restarts
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+
+networks:
+  evs-net:
+    driver: bridge
