@@ -37,17 +37,7 @@ async def verify_email_async(
     user_id: int | None = None
 ) -> Dict[str, Any]:
     """
-    Production verification pipeline:
-      ✔ Cache lookup
-      ✔ MX lookup
-      ✔ Domain backoff sleep
-      ✔ Domain concurrency slot
-      ✔ SMTP probe
-      ✔ Risk scoring engine
-      ✔ Deliverability history update
-      ✔ Domain reputation score
-      ✔ Cache store
-      ✔ Database persistence
+    Production verification pipeline.
     """
 
     # -----------------------------------------
@@ -66,11 +56,7 @@ async def verify_email_async(
     # 2) FORMAT VALIDATION
     # -----------------------------------------
     if "@" not in email:
-        data = {
-            "email": email,
-            "status": "invalid",
-            "reason": "no_at_symbol"
-        }
+        data = {"email": email, "status": "invalid", "reason": "no_at_symbol"}
         set_cached(email, data)
         return data
 
@@ -82,11 +68,7 @@ async def verify_email_async(
     # -----------------------------------------
     mx_hosts = choose_mx_for_domain(domain)
     if not mx_hosts:
-        data = {
-            "email": email,
-            "status": "invalid",
-            "reason": "no_mx"
-        }
+        data = {"email": email, "status": "invalid", "reason": "no_mx"}
         set_cached(email, data)
         record_domain_result(domain, False)
         return data
@@ -102,25 +84,16 @@ async def verify_email_async(
     # 5) CONCURRENCY SLOT ACQUIRE
     # -----------------------------------------
     if not acquire_slot(domain):
-        # High load on domain (greylisting defense)
-        return {
-            "email": email,
-            "status": "unknown",
-            "reason": "domain_slots_full"
-        }
+        return {"email": email, "status": "unknown", "reason": "domain_slots_full"}
 
     # -----------------------------------------
-    # 6) SMTP PROBE
+    # 6) SMTP PROBE (FIXED SIGNATURE)
     # -----------------------------------------
     try:
-        smtp_res = await smtp_probe(email, domain, mx_hosts)
+        smtp_res = await smtp_probe(email, mx_hosts)
     except Exception as e:
         logger.exception("SMTP probe failed: %s", e)
-        smtp_res = {
-            "email": email,
-            "status": "error",
-            "exception": str(e)
-        }
+        smtp_res = {"email": email, "status": "error", "exception": str(e)}
         increase_backoff(domain)
     finally:
         release_slot(domain)
@@ -134,8 +107,7 @@ async def verify_email_async(
     # 8) DELIVERABILITY TRACKING
     # -----------------------------------------
     try:
-        good = scored.get("status") == "valid"
-        record_domain_result(domain, good)
+        record_domain_result(domain, scored.get("status") == "valid")
     except Exception:
         pass
 
@@ -144,8 +116,7 @@ async def verify_email_async(
     # -----------------------------------------
     try:
         mx_used = smtp_res.get("mx_host")
-        domain_rep = compute_domain_score(domain, mx_used)
-        scored["domain_reputation"] = domain_rep
+        scored["domain_reputation"] = compute_domain_score(domain, mx_used)
     except Exception:
         scored["domain_reputation"] = None
 
@@ -179,14 +150,18 @@ async def verify_email_async(
 
 
 # ---------------------------------------------------------
-# SYNC WRAPPER (for routers, bulk processor)
+# SAFE SYNC WRAPPER (NO event-loop crash)
 # ---------------------------------------------------------
 
 def verify_email_sync(email: str, user_id: int | None = None) -> Dict[str, Any]:
-    """Run async verifier in sync mode safely."""
+    """
+    Run async verifier safely in sync context.
+    """
+
     try:
-        return asyncio.run(verify_email_async(email, user_id))
-    except RuntimeError:
-        # event loop already running (e.g. inside async worker)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
+        # Already in event loop → run in executor
         return loop.run_until_complete(verify_email_async(email, user_id))
+    except RuntimeError:
+        # No running loop → safe to call asyncio.run
+        return asyncio.run(verify_email_async(email, user_id))
