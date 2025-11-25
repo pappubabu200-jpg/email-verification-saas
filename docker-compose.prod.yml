@@ -1,141 +1,5 @@
 version: "3.8"
 
-services:
-  postgres:
-    image: postgres:15
-    restart: always
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-svcuser}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-svcpass}
-      POSTGRES_DB: ${POSTGRES_DB:-emailsaas}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7
-    restart: always
-    volumes:
-      - redisdata:/data
-    command: ["redis-server", "--save", "60", "1"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  minio:
-    image: minio/minio
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-    command: server /data
-    volumes:
-      - miniodata:/data
-    ports:
-      - "9000:9000"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 15s
-      retries: 5
-
-  web:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    env_file:
-      - ./backend/.env.prod
-    ports:
-      - "8000:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-
-  worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    command: >
-      celery -A backend.app.celery_app.celery_app worker 
-      --loglevel=info 
-      -Q default,bulk 
-      --concurrency=4
-    env_file:
-      - ./backend/.env.prod
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A backend.app.celery_app.celery_app inspect ping"]
-      interval: 20s
-      timeout: 10s
-      retries: 3
-
-  beat:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    command: celery -A backend.app.celery_app.celery_app beat --loglevel=info
-    env_file:
-      - ./backend/.env.prod
-    depends_on:
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A backend.app.celery_app.celery_app beat --loglevel=warning --detach"]
-      interval: 30s
-      retries: 3
-
-  flower:
-    image: mher/flower
-    command: flower --broker=redis://redis:6379/0
-    ports:
-      - "5555:5555"
-    depends_on:
-      redis:
-        condition: service_healthy
-
-volumes:
-  pgdata:
-  redisdata:
-  miniodata:
-
-
-
-  web:
-    environment:
-      REDIS_URL: redis://redis:6379/1
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
-
-  worker:
-    environment:
-      REDIS_URL: redis://redis:6379/1
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
-
-  beat:
-    environment:
-      REDIS_URL: redis://redis:6379/1
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
-
-      worker:
-    command: celery -A backend.app.celery_app.celery_app worker \
-             --loglevel=info --queues=default,bulk_jobs,webhooks --concurrency=4
-             version: "3.8"
-
 x-default-restarts: &default-restarts
   restart: unless-stopped
   deploy:
@@ -161,7 +25,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h 127.0.0.1 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 6
+      retries: 5
     networks:
       - evs-net
     <<: *default-restarts
@@ -176,7 +40,7 @@ services:
       test: ["CMD-SHELL", "redis-cli ping | grep PONG || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 6
+      retries: 5
     networks:
       - evs-net
     <<: *default-restarts
@@ -194,8 +58,8 @@ services:
       - "9000:9000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live || exit 1"]
-      interval: 30s
-      retries: 3
+      interval: 20s
+      retries: 5
     networks:
       - evs-net
     <<: *default-restarts
@@ -209,18 +73,18 @@ services:
       - ./backend/.env.prod
     ports:
       - "8000:8000"
-    depends_on:
-      - postgres
-      - redis
-      - minio
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/ready || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
     volumes:
       - ./backend:/usr/src/app/backend:ro
-    command: ["sh", "-c", "uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --workers 4 --loop uvloop"]
+    command: >
+      sh -c "uvicorn backend.app.main:app
+      --host 0.0.0.0 --port 8000 --workers 4 --loop uvloop"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     networks:
       - evs-net
     <<: *default-restarts
@@ -232,13 +96,18 @@ services:
     container_name: evs_worker
     env_file:
       - ./backend/.env.prod
-    depends_on:
-      - redis
-      - postgres
-      - web
-    command: ["sh", "-c", "celery -A backend.app.celery_app.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-4}"]
     volumes:
       - ./backend:/usr/src/app/backend:ro
+    command: >
+      celery -A backend.app.celery_app.celery_app worker
+      --loglevel=info
+      --queues=default,bulk_jobs,webhooks
+      --concurrency=4
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     networks:
       - evs-net
     <<: *default-restarts
@@ -250,12 +119,12 @@ services:
     container_name: evs_beat
     env_file:
       - ./backend/.env.prod
-    depends_on:
-      - redis
-      - postgres
-    command: ["sh", "-c", "celery -A backend.app.celery_app.celery_app beat --loglevel=info"]
     volumes:
       - ./backend:/usr/src/app/backend:ro
+    command: celery -A backend.app.celery_app.celery_app beat --loglevel=info
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - evs-net
     <<: *default-restarts
@@ -263,13 +132,16 @@ services:
   flower:
     image: mher/flower
     container_name: evs_flower
-    command: ["sh", "-c", "flower --broker=${CELERY_BROKER_URL:-redis://redis:6379/1} --port=5555"]
-    ports:
-      - "5555:5555"
+    command: >
+      flower --broker=${CELERY_BROKER_URL:-redis://redis:6379/1}
+      --port=5555
     environment:
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/1}
+    ports:
+      - "5555:5555"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     networks:
       - evs-net
     <<: *default-restarts
@@ -289,13 +161,12 @@ services:
       - evs-net
     <<: *default-restarts
 
-  # Optional: certbot for Let's Encrypt (comment/uncomment if you want auto TLS)
   certbot:
     image: certbot/certbot
     container_name: evs_certbot
     volumes:
       - ./deploy/letsencrypt:/etc/letsencrypt
-    entrypoint: ["/bin/sh", "-c"]
+    entrypoint: ["sh", "-c"]
     command: "sleep 3600"
     networks:
       - evs-net
