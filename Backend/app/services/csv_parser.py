@@ -3,73 +3,112 @@
 import io
 import csv
 import re
-from typing import List, Optional
+from typing import List, Optional, Set
 
-# Strict but flexible email regex (fast + production safe)
+# More accurate email regex - accepts longer TLDs, underscores, etc.
+# Still fast, safe, and rejects most garbage
 EMAIL_REGEX = re.compile(
-    r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$",
-    re.IGNORECASE
+    r"(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$)"
 )
+
+# Alternative: use the official regex from the HTML5 spec (very permissive but correct)
+# EMAIL_REGEX = re.compile(r"^[\w!#$%&'*+/=?`{|}~^-]+(?:\.[\w!#$%&'*+/=?`{|}~^-]+)*@"
+#                          r"(?:[A-Z0-9-]+\.)+[A-Z]{2,}$", re.IGNORECASE)
+
+
+def _normalize_headers(header_names: Optional[List[str]]) -> Set[str]:
+    """Normalize expected header names to lowercase set for O(1) lookup."""
+    if not header_names:
+        return set()
+    return {name.strip().lower() for name in header_names if name}
+
+
+def _is_likely_email_column(header: str) -> bool:
+    """Heuristic: does this header look like an email column?"""
+    header = header.lower()
+    return any(keyword in header for keyword in ("email", "e-mail", "mail", "courriel", "correo"))
 
 
 def extract_emails_from_csv_bytes(
     content: bytes,
-    header_names: Optional[List[str]] = None
+    header_names: Optional[List[str]] = None,
+    max_sample_size: int = 8192,
 ) -> List[str]:
     """
-    Parse CSV bytes and extract valid emails.
+    Extract valid, unique email addresses from CSV bytes.
 
-    Enhancements:
-    - strict regex validation
-    - header filtering (email, Email, E-mail…)
-    - supports arbitrary CSV delimiters
-    - removes duplicates (case-insensitive)
+    Features:
+    - Auto-detects delimiter (comma, semicolon, tab, etc.)
+    - Supports custom header names (e.g. ["Contact Email", "user_email"])
+    - Robust email validation
+    - Case-insensitive deduplication
+    - Handles messy real-world CSVs gracefully
+
+    Args:
+        content: Raw CSV bytes
+        header_names: Optional list of column names that contain emails
+        max_sample_size: Size of sample used for dialect sniffing
+
+    Returns:
+        List of unique lowercase emails
     """
-
-    # decode safely
-    text = content.decode("utf-8", errors="ignore")
-
-    # Allow automatic delimiter detection
     try:
-        sample = text[:1024]
-        dialect = csv.Sniffer().sniff(sample)
-    except Exception:
-        dialect = csv.excel  # fallback
+        text = content.decode("utf-8-sig")  # Handles BOM correctly
+    except UnicodeDecodeError:
+        text = content.decode("utf-8", errors="replace")
+
+    # Improve dialect detection reliability
+    sample = text[:max_sample_size]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|:")  # Common delimiters
+        if not csv.Sniffer().has_header(sample):
+            # If no header detected, fall back to excel (common in exports)
+            dialect = csv.excel
+    except csv.Error:
+        dialect = csv.excel  # Most common fallback
 
     reader = csv.DictReader(io.StringIO(text), dialect=dialect)
 
-    out: List[str] = []
-    seen = set()
+    expected_headers = _normalize_headers(header_names)
 
-    # Normalize header names early
-    header_set = {h.lower(): True for h in header_names} if header_names else {}
+    seen: Set[str] = set()
+    emails: List[str] = []
 
     for row in reader:
         if not row:
             continue
 
-        for k, v in row.items():
-            if not v:
+        for raw_key, value in row.items():
+            if not value or not isinstance(value, str):
                 continue
 
-            # clean value
-            value = str(v).strip()
-
-            key_lower = (k or "").strip().lower()
-
-            # If header_names provided, apply strict match
-            if header_names and key_lower in header_set:
-                email = value.lower()
-                if EMAIL_REGEX.match(email) and email not in seen:
-                    seen.add(email)
-                    out.append(email)
+            cell = value.strip()
+            if not cell:
                 continue
 
-            # Default heuristics
-            if "email" in key_lower or "@" in value:
-                email = value.lower()
-                if EMAIL_REGEX.match(email) and email not in seen:
-                    seen.add(email)
-                    out.append(email)
+            key = (raw_key or "").strip()
+            key_lower = key.lower()
 
-    return out
+            # Priority 1: Explicit header match
+            if expected_headers and key_lower in expected_headers:
+                candidate = cell.lower()
+                if EMAIL_REGEX.match(candidate) and candidate not in seen:
+                    seen.add(candidate)
+                    emails.append(candidate)
+                continue  # Don't double-check this cell
+
+            # Priority 2: Header looks like email column
+            if _is_likely_email_column(key):
+                candidate = cell.lower()
+                if EMAIL_REGEX.match(candidate) and candidate not in seen:
+                    seen.add(candidate)
+                    emails.append(candidate)
+
+            # Priority 3: Cell itself looks like an email (fallback)
+            elif "@" in cell and "." in cell.split("@")[-1]:
+                candidate = cell.lower()
+                if EMAIL_REGEX.match(candidate) and candidate not in seen:
+                    seen.add(candidate)
+                    emails.append(candidate)
+
+    return emails
