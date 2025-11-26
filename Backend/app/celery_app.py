@@ -111,3 +111,50 @@ def make_celery_app(app_name: str = "email_verification_saas") -> Celery:
 
 # Singleton instance
 celery_app = make_celery_app()
+# backend/app/celery_app.py
+from celery import Celery
+import time
+import logging
+from prometheus_client import Counter, Histogram
+
+logger = logging.getLogger(__name__)
+
+app = Celery(
+    "backend_tasks",
+    broker="redis://localhost:6379/1",  # replace with settings.REDIS_URL or your broker
+    backend="redis://localhost:6379/2",
+)
+
+# ----------------------
+# Worker Prometheus metrics
+# ----------------------
+WORKER_TASK_TOTAL = Counter(
+    "worker_tasks_total",
+    "Worker tasks executed",
+    ["task", "status"]  # status: started|success|failed
+)
+
+WORKER_TASK_LATENCY = Histogram(
+    "worker_task_latency_seconds",
+    "Latency of worker tasks",
+    ["task"]
+)
+
+# Example: instrument tasks centrally using base task
+class InstrumentedTask(app.Task):
+    def __call__(self, *args, **kwargs):
+        task_name = self.name or "unknown"
+        WORKER_TASK_TOTAL.labels(task=task_name, status="started").inc()
+        start = time.time()
+        try:
+            result = self.run(*args, **kwargs)
+            WORKER_TASK_TOTAL.labels(task=task_name, status="success").inc()
+            return result
+        except Exception as exc:
+            WORKER_TASK_TOTAL.labels(task=task_name, status="failed").inc()
+            raise
+        finally:
+            WORKER_TASK_LATENCY.labels(task=task_name).observe(time.time() - start)
+
+# Set default task base so all tasks inherit instrumentation
+app.Task = InstrumentedTask
