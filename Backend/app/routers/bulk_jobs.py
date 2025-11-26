@@ -79,7 +79,19 @@ async def create_bulk_job(
     Creates database bulk job record.
     """
 
-    file_path = f"uploads/{upload_id}.csv"
+    # Validate upload_id is a UUID
+    try:
+        uuid_obj = uuid.UUID(upload_id)
+    except Exception:
+        raise HTTPException(400, "Invalid upload_id format.")
+
+    folder = "uploads"
+    abs_folder = os.path.abspath(folder)
+    file_name = f"{upload_id}.csv"
+    file_path = os.path.normpath(os.path.join(abs_folder, file_name))
+    # Ensure path is within uploads directory
+    if not file_path.startswith(abs_folder):
+        raise HTTPException(400, "Invalid path.")
     if not os.path.exists(file_path):
         raise HTTPException(404, "Uploaded file not found.")
 
