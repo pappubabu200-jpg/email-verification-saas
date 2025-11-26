@@ -235,3 +235,12 @@ async def bulk_job_cancel(
 
     await bulk_repo.update(job, {"status": "cancelled"})
     return {"cancelled": True, "job_id": job_id}
+    from services.webhook_service import trigger_webhook
+
+# After verification succeeds:
+await trigger_webhook(
+    "verification.completed",
+    {"email": email, "result": result_dict, "credits_used": 1},
+    team_id=current_team.id
+)
+
