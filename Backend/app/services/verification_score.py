@@ -1,121 +1,148 @@
 from typing import Dict, Any
+from enum import StrEnum
 
-# Score weights (adjust for your system)
+class EmailStatus(StrEnum):
+    VALID = "valid"
+    RISKY = "risky"      # accept-all, greylisted, low rep
+    INVALID = "invalid"
+    UNKNOWN = "unknown"
+
+# Risk Score: 0 = pristine, 100 = definitely bad
+# This is the industry standard (Neverbounce, ZeroBounce, etc.)
 WEIGHTS = {
-    "valid_bonus": 30,
-    "invalid_penalty": 40,
-    "greylist_penalty": 10,
-    "role_penalty": 10,
-    "spam_penalty": 20,
-    "disposable_penalty": 30,
-    "smtp_spam_penalty": 15,
-    "domain_reputation_weight": 0.5,
-    "ip_reputation_weight": 0.5,
+    "valid_bonus": -40,           # Strongly reduces risk
+    "hard_bounce_penalty": +90,
+    "soft_bounce_penalty": +20,
+    "spamtrap_penalty": +100,
+    "disposable_penalty": +70,
+    "role_account_penalty": +25,
+    "greylist_penalty": +15,
+    "accept_all_penalty": +30,
+    "smtp_spam_hint_penalty": +40,
+    "domain_rep_weight": 0.6,
+    "ip_rep_weight": 0.4,
 }
 
-
-def score_verification(probe: Dict[str, Any]) -> Dict:
+def score_verification(probe: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Production-grade scoring engine.
+    Production-grade email risk scoring engine (2025 edition)
     
-    Input: smtp_probe result
-    Output:
-        {
-            status: "valid" | "invalid" | "unknown",
-            risk_score: 0–100,
-            details: {... merged payload ...}
-        }
+    Risk Score: 0–100 where:
+        0–20   → Very clean
+        20–50  → Safe / low risk
+        50–75  → Risky (monitor)
+        75–90  → High risk
+        90–100 → Toxic (block)
     """
+    risk_score = 50  # Neutral start
+    status = EmailStatus.UNKNOWN
 
-    # Base score: 50 = neutral
-    score = 50
-    status = "unknown"
-
-    rc = probe.get("rcpt_code")
+    # Extract data
+    rcpt_code = probe.get("rcpt_code")
     spam_flags = probe.get("spam_flags", [])
     bounce_class = probe.get("bounce_class")
-    ip_info = probe.get("ip_info") or {}
     domain_rep = probe.get("domain_reputation") or {}
-    mx_score = domain_rep.get("score", 50)
+    ip_info = probe.get("ip_info") or {}
 
-    # ----------------------------
-    # 1. RCPT Code Scoring
-    # ----------------------------
+    domain_score = float(domain_rep.get("score", 50))  # 0–100, higher = better
+    ip_score = float(ip_info.get("score", 50))
+
+    # ------------------------------------------------------------------
+    # 1. SMTP Response Code (RCPT TO)
+    # ------------------------------------------------------------------
     try:
-        rc_int = int(rc) if rc is not None else None
-    except:
-        rc_int = None
+        rc = int(rcpt_code) if rcpt_code else None
+    except (ValueError, TypeError):
+        rc = None
 
-    if rc_int:
-        if 200 <= rc_int < 300:
-            status = "valid"
-            score += WEIGHTS["valid_bonus"]
-        elif 400 <= rc_int < 500:
-            status = "unknown"
-            score -= WEIGHTS["greylist_penalty"]
-        elif 500 <= rc_int < 600:
-            status = "invalid"
-            score += WEIGHTS["invalid_penalty"]
+    if rc is not None:
+        if 200 <= rc < 300:
+            risk_score += WEIGHTS["valid_bonus"]        # e.g. -40 → drops to ~10
+            status = EmailStatus.VALID
+        elif rc == 450 or rc == 451:  # Greylisting
+            risk_score += WEIGHTS["greylist_penalty"]
+            status = EmailStatus.RISKY
+        elif 500 <= rc < 600:
+            risk_score += WEIGHTS["hard_bounce_penalty"]  # +90 → ~100
+            status = EmailStatus.INVALID
 
-    # ----------------------------
-    # 2. Disposable or Spam Flags
-    # ----------------------------
-    if "known_spamtrap_domain" in spam_flags:
-        score -= WEIGHTS["disposable_penalty"]
-        status = "invalid"
+    # ------------------------------------------------------------------
+    # 2. Critical Red Flags (override everything)
+    # ------------------------------------------------------------------
+    if "known_spamtrap_domain" in spam_flags or "spamtrap" in spam_flags:
+        risk_score = 100
+        status = EmailStatus.INVALID
+        final = {"status": status, "risk_score": 100, "details": probe, "reason": "spamtrap"}
+        return {**final, "risk_level": "toxic"}
 
     if "disposable_domain" in spam_flags:
-        score -= WEIGHTS["disposable_penalty"]
+        risk_score = max(risk_score, 85)
+        risk_score += WEIGHTS["disposable_penalty"]
+        status = EmailStatus.INVALID
 
     if "role_account" in spam_flags:
-        score -= WEIGHTS["role_penalty"]
+        risk_score += WEIGHTS["role_account_penalty"]
 
-    if "smtp_spam_hint" in spam_flags or "smtp_spamtrap_hint" in spam_flags:
-        score -= WEIGHTS["smtp_spam_penalty"]
+    if any(f in spam_flags for f in ["smtp_spam_hint", "smtp_spamtrap_hint", "honeypot"]):
+        risk_score += WEIGHTS["smtp_spam_hint_penalty"]
 
-    # ----------------------------
+    # ------------------------------------------------------------------
     # 3. Bounce Classification
-    # ----------------------------
+    # ------------------------------------------------------------------
     if bounce_class == "hard":
-        score += WEIGHTS["invalid_penalty"]
-        status = "invalid"
+        risk_score = max(risk_score, 90)
+        risk_score += WEIGHTS["hard_bounce_penalty"]
+        status = EmailStatus.INVALID
+    elif bounce_class == "soft":
+        risk_score += WEIGHTS["soft_bounce_penalty"]
+        status = EmailStatus.RISKY
+    elif bounce_class == "accept_all":
+        risk_score += WEIGHTS["accept_all_penalty"]
+        status = EmailStatus.RISKY
 
-    if bounce_class == "soft":
-        score -= WEIGHTS["greylist_penalty"]
+    # ------------------------------------------------------------------
+    # 4. Reputation Adjustments (scaled contribution)
+    # ------------------------------------------------------------------
+    # Convert reputation scores: higher rep_score → lower risk
+    domain_risk_contribution = (50 - domain_score) * WEIGHTS["domain_rep_weight"]
+    ip_risk_contribution = (50 - ip_score) * WEIGHTS["ip_rep_weight"]
 
-    if bounce_class == "accept_all":
-        status = "unknown"  # risky
-        score -= 5
+    risk_score += domain_risk_contribution + ip_risk_contribution
 
-    # ----------------------------
-    # 4. Domain Reputation Score
-    # ----------------------------
-    domain_rep_score = domain_rep.get("score", 50)
-    score += (domain_rep_score - 50) * WEIGHTS["domain_reputation_weight"]
+    # ------------------------------------------------------------------
+    # 5. Final Clamp & Status Resolution
+    # ------------------------------------------------------------------
+    risk_score = max(0, min(100, risk_score))
 
-    # ----------------------------
-    # 5. MX IP Reputation
-    # ----------------------------
-    ip_rep = ip_info.get("score", 50)
-    score += (ip_rep - 50) * WEIGHTS["ip_reputation_weight"]
+    # Final status overrides
+    if risk_score >= 90:
+        status = EmailStatus.INVALID
+    elif risk_score >= 70:
+        status = EmailStatus.RISKY
+    elif risk_score <= 25:
+        status = EmailStatus.VALID
 
-    # ----------------------------
-    # Safety Clamps & Finalization
-    # ----------------------------
-    if score < 0:
-        score = 0
-    if score > 100:
-        score = 100
+    # Risk level for frontend
+    if risk_score <= 20:
+        risk_level = "excellent"
+    elif risk_score <= 50:
+        risk_level = "good"
+    elif risk_score <= 75:
+        risk_level = "warning"
+    elif risk_score <= 90:
+        risk_level = "dangerous"
+    else:
+        risk_level = "toxic"
 
-    # If invalid with low score
-    if status == "invalid":
-        score = max(score, 80)  # invalid should be high risk
-
-    # Pack everything
-    final = {
-        "status": status,
-        "risk_score": int(score),
-        "details": probe
+    return {
+        "status": status.value,
+        "risk_score": int(round(risk_score)),
+        "risk_level": risk_level,
+        "details": probe,
+        "scoring_breakdown": {  # Optional: for debugging
+            "base": 50,
+            "smtp_adjustment": risk_score - 50 - domain_risk_contribution - ip_risk_contribution,
+            "domain_rep_contribution": round(domain_risk_contribution, 1),
+            "ip_rep_contribution": round(ip_risk_contribution, 1),
+        }
     }
-
-    return final
