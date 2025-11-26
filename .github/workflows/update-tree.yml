@@ -1,1 +1,61 @@
+name: Update Repository Tree in README
 
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Allows manual trigger
+
+jobs:
+  update-readme-tree:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Needed to push changes
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate tree
+        run: |
+          echo "## Project Structure" > tree.md
+          echo "\`\`\`text" >> tree.md
+          tree -a --dirsfirst -L 4 \
+            -I '__pycache__|*.pyc|node_modules|.git|.venv|venv|env|.next|.env*|.DS_Store' \
+            -I 'migrations|alembic/versions' \
+            . >> tree.md
+          echo "\`\`\`" >> tree.md
+
+          # Special: Show full alembic/versions list (since it's important)
+          echo "" >> tree.md
+          echo "### Database Migrations (alembic/versions/)" >> tree.md
+          echo "\`\`\`text" >> tree.md
+          if [ -d "Backend/app/alembic/versions" ]; then
+            find Backend/app/alembic/versions -type f -name "*.py" | sort | sed 's|.*/|├── |' >> tree.md
+          fi
+          echo "\`\`\`" >> tree.md
+
+      - name: Update README.md
+        run: |
+          if grep -q "<!-- TREE_START -->" README.md; then
+            # Replace existing tree
+            sed -i '/<!-- TREE_START -->/,/<!-- TREE_END -->/c\<!-- TREE_START -->\n\n'"$(cat tree.md)"'\n\n<!-- TREE_END -->' README.md
+          else
+            # Add tree just after the first heading
+            sed -i '/# email-verification-saas/a \
+            \n<!-- TREE_START -->\n'"$(cat tree.md)"'\n<!-- TREE_END -->\n' README.md
+          fi
+
+      - name: Commit & Push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update repository tree [skip ci]"
+            git push
+            echo "Tree updated and pushed!"
+          fi
