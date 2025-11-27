@@ -353,3 +353,33 @@ from backend.app.workers.admin_metrics_live import admin_metrics_loop
 async def _start_metrics_loop():
     asyncio.create_task(admin_metrics_loop())
     
+from fastapi import WebSocket, APIRouter
+from backend.app.services.ws.admin_metrics_ws import admin_metrics_ws
+from backend.app.services.ws.webhook_ws import webhook_ws
+
+ws_router = APIRouter()
+
+@ws_router.websocket("/ws/admin/metrics")
+async def admin_metrics_socket(ws: WebSocket):
+    await admin_metrics_ws.connect(ws)
+    try:
+        while True:
+            await ws.receive_text()  # keep alive
+    except:
+        pass
+    finally:
+        await admin_metrics_ws.disconnect(ws)
+
+@ws_router.websocket("/ws/admin/webhooks")
+async def admin_webhooks_socket(ws: WebSocket):
+    await webhook_ws.connect(ws)
+    try:
+        while True:
+            await ws.receive_text()
+    except:
+        pass
+    finally:
+        await webhook_ws.disconnect(ws)
+
+app.include_router(ws_router)
+
