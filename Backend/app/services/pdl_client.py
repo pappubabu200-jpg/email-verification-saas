@@ -68,3 +68,33 @@ def pdl_search_by_domain(domain: str, limit: int = 10) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.exception("PDL request failed: %s", e)
         return []
+# backend/app/services/pdl_client.py
+import os
+import logging
+from typing import Optional, Dict, Any
+import httpx
+from backend.app.config import settings
+
+logger = logging.getLogger(__name__)
+
+PDL_API_KEY = os.getenv("PDL_API_KEY", getattr(settings, "PDL_API_KEY", None))
+PDL_BASE = os.getenv("PDL_BASE_URL", "https://api.peopledatalabs.com/v5")
+
+async def pdl_enrich_email(email: str) -> Optional[Dict[str, Any]]:
+    """
+    Enrich person by email via PDL enrichment endpoint.
+    """
+    if not PDL_API_KEY:
+        logger.debug("PDL API key not configured")
+        return None
+    url = f"{PDL_BASE}/person/enrich"
+    params = {"email": email}
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {PDL_API_KEY}"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(url, headers=headers, params=params)
+            r.raise_for_status()
+            return r.json()
+    except Exception as e:
+        logger.debug("PDL enrich failed for %s: %s", email, e)
+        return None
