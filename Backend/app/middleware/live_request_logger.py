@@ -8,7 +8,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.requests import Request
 from starlette.responses import Response
 from backend.app.services.ws.api_logs_ws import api_logs_ws
-
+from backend.app.services.ws.api_logs_pubsub import publish_api_log
 logger = logging.getLogger(__name__)
 
 class LiveRequestLoggerMiddleware:
@@ -84,9 +84,7 @@ class LiveRequestLoggerMiddleware:
                     "user_id": str(user_id) if user_id else None,
                     "api_key_hint": (api_key[:8] + "...") if api_key else None,
                 }
-
-                # fire-and-forget broadcast
-                asyncio.create_task(self._safe_broadcast(payload))
+                asyncio.create_task(publish_api_log(payload))
             except Exception:
                 logger.exception("Failed to schedule API log broadcast")
 
