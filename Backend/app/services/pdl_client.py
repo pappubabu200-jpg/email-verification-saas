@@ -98,3 +98,85 @@ async def pdl_enrich_email(email: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.debug("PDL enrich failed for %s: %s", email, e)
         return None
+# backend/app/services/pdl_client.py
+
+"""
+PDL Client (People Data Labs)
+Used for:
+  ✓ Email enrichment
+  ✓ Company domain enrichment
+  ✓ Employment history
+  ✓ Social links
+"""
+
+import os
+import logging
+import requests
+
+logger = logging.getLogger(__name__)
+
+PDL_API_KEY = os.getenv("PDL_API_KEY", "")
+PDL_TIMEOUT = 10
+
+
+class PDLClient:
+    BASE = "https://api.peopledatalabs.com/v5"
+
+    def __init__(self, api_key: str | None = None):
+        self.api_key = api_key or PDL_API_KEY
+        if not self.api_key:
+            raise RuntimeError("PDL_API_KEY missing")
+
+    # ------------------------------------------------
+    # EMAIL ENRICHMENT
+    # ------------------------------------------------
+    def fetch_person_by_email(self, email: str) -> dict | None:
+        """
+        Best endpoint for Decision Maker enrichment.
+        GET /person/enrich
+        """
+        url = f"{self.BASE}/person/enrich"
+
+        params = {
+            "api_key": self.api_key,
+            "email": email,
+        }
+
+        try:
+            r = requests.get(url, params=params, timeout=PDL_TIMEOUT)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("status") == 200:
+                    return data.get("data")
+            else:
+                logger.debug(f"PDL enrich non-200: {r.text}")
+        except Exception as e:
+            logger.debug(f"PDL enrich error: {e}")
+
+        return None
+
+    # ------------------------------------------------
+    # SEARCH PEOPLE BY DOMAIN (optional)
+    # ------------------------------------------------
+    def search_people_by_domain(self, domain: str, limit: int = 25) -> list[dict]:
+        """
+        Search for employees of a company domain.
+        Useful for DM discovery.
+        """
+        url = f"{self.BASE}/person/search"
+
+        params = {
+            "api_key": self.api_key,
+            "query": json.dumps({"work_email": {"$contains": domain}}),
+            "size": limit,
+        }
+
+        try:
+            r = requests.get(url, params=params, timeout=PDL_TIMEOUT)
+            if r.status_code == 200:
+                return r.json().get("data", [])
+        except Exception as e:
+            logger.debug(f"PDL search error: {e}")
+
+        return []
+
