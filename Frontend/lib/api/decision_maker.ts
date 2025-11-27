@@ -99,3 +99,27 @@ export async function exportDecisionMakerVCard(id: string | number) {
   });
   return res.data;
 }
+
+// Frontend/lib/api/decision_maker.ts
+import axios from "../axios";
+
+export type DMResult = {
+  id: string;
+  name?: string;
+  title?: string;
+  company?: string;
+  email?: string;
+  confidence?: number;
+  linkedin?: string;
+  // other fields...
+};
+
+export async function searchDecisionMakers(q: string, limit = 10) {
+  const res = await axios.get("/decision-maker/search", { params: { q, limit } });
+  return res.data.results as DMResult[];
+}
+
+export async function getDecisionMakerDetail(uid: string) {
+  const res = await axios.get(`/decision-maker/${encodeURIComponent(uid)}`);
+  return res.data as any;
+}
