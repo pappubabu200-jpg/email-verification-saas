@@ -26,3 +26,28 @@ def send_webhook_async(self, url: str, payload: dict):
     except Exception as e:
         logger.exception("Webhook failed: %s", e)
         raise self.retry(countdown=2 ** self.request.retries)
+
+from backend.app.services.ws.webhook_ws import webhook_ws
+
+async def dispatch_webhook(endpoint, payload, event_id):
+    try:
+        # existing send logic...
+        await webhook_ws.broadcast({
+            "id": event_id,
+            "ts": datetime.utcnow().isoformat(),
+            "endpoint": endpoint,
+            "payload_preview": str(payload)[:300],
+            "status": "delivered"
+        })
+    except Exception as e:
+        await webhook_ws.broadcast({
+            "id": event_id,
+            "ts": datetime.utcnow().isoformat(),
+            "endpoint": endpoint,
+            "payload_preview": str(payload)[:300],
+            "status": "failed",
+            "last_error": str(e)
+        })
+
+
+
