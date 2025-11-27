@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
-import axios from "@/lib/axios";
+import { useMemo } from "react";
 import Card from "@/components/ui/Card";
 import Loader from "@/components/ui/Loader";
 import Button from "@/components/ui/Button";
 import ErrorBanner from "@/components/ui/ErrorBanner";
+import { useAdminMetricsWS } from "@/hooks/useAdminMetricsWS";
 
-// Recharts components (should be in your frontend dependencies)
+// Recharts
 import {
   LineChart,
   Line,
@@ -20,7 +20,15 @@ import {
   Cell,
 } from "recharts";
 
-function SmallStat({ title, value, hint }: { title: string; value: string | number; hint?: string }) {
+function SmallStat({
+  title,
+  value,
+  hint,
+}: {
+  title: string;
+  value: string | number;
+  hint?: string;
+}) {
   return (
     <div className="p-4 rounded border bg-white">
       <div className="text-xs text-gray-500">{title}</div>
@@ -31,84 +39,51 @@ function SmallStat({ title, value, hint }: { title: string; value: string | numb
 }
 
 export default function AdminDashboardsPage() {
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  // 🔥 REALTIME WebSocket stream
+  const ws = useAdminMetricsWS();
 
-  // Data
-  const [credits, setCredits] = useState<{ remaining: number; reserved: number } | null>(null);
-  const [lastVerificationsSeries, setLastVerificationsSeries] = useState<Array<any>>([]);
-  const [deliverability, setDeliverability] = useState<{ score: number; trend: number } | null>(null);
-  const [recentEvents, setRecentEvents] = useState<Array<any>>([]);
+  const credits = ws?.credits || null;
+  const lastVerificationsSeries = ws?.verifications || [];
+  const deliverability = ws?.deliverability || null;
+  const recentEvents = ws?.events || [];
 
-  // load everything
-  const loadAll = async () => {
-    setError(null);
-    setLoading(true);
-    try {
-      const [cRes, vRes, dRes, rRes] = await Promise.all([
-        axios.get("/admin/analytics/credits"), // { remaining, reserved }
-        axios.get("/admin/analytics/last_verifications"), // { series: [{ts, count}, ...] }
-        axios.get("/admin/analytics/deliverability"), // { score: 93.2, trend: -0.4 }
-        axios.get("/admin/analytics/recent_actions"), // { events: [...] }
-      ]);
-
-      setCredits(cRes.data || null);
-      setLastVerificationsSeries((vRes.data && vRes.data.series) || []);
-      setDeliverability(dRes.data || null);
-      setRecentEvents((rRes.data && rRes.data.events) || []);
-    } catch (err: any) {
-      console.error("Admin dashboard load failed", err);
-      setError(err?.response?.data?.detail || "Failed to load admin analytics");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadAll();
-    if (!autoRefresh) return;
-
-    const id = setInterval(loadAll, 5000);
-    return () => clearInterval(id);
-  }, [autoRefresh]);
+  // If WS not yet connected
+  if (!ws)
+    return (
+      <div className="p-8 flex justify-center">
+        <Loader />
+      </div>
+    );
 
   // derived values for charts
   const verificationsChart = useMemo(() => {
-    // Expect series: [{ts: "2025-11-26T10:00:00Z", count: 120}, ...]
     return lastVerificationsSeries.map((p: any) => ({
       time: new Date(p.ts).toLocaleTimeString(),
       count: p.count,
     }));
   }, [lastVerificationsSeries]);
 
-  if (loading) return <div className="p-8"><Loader /></div>;
-  if (error) return <ErrorBanner message={error} />;
-
   return (
     <div className="max-w-7xl mx-auto p-8 space-y-8">
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Admin Dashboard</h1>
-          <p className="text-sm text-gray-500">Overview: Live metrics, usage and deliverability.</p>
+          <p className="text-sm text-gray-500">Live metrics & analytics (WebSocket powered)</p>
         </div>
 
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
-            Auto-refresh
-          </label>
-          <Button onClick={loadAll}>Refresh</Button>
-        </div>
+        <Button onClick={() => location.reload()}>Reload</Button>
       </div>
 
-      {/* Top stats */}
+      {/* TOP METRICS */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <SmallStat
           title="Credits Remaining (global)"
           value={credits ? credits.remaining.toLocaleString() : "—"}
           hint={`Reserved: ${credits ? credits.reserved.toLocaleString() : "—"}`}
         />
+
+        {/* Deliverability Circle */}
         <div className="p-4 rounded border bg-white">
           <div className="flex justify-between items-center">
             <div>
@@ -117,11 +92,13 @@ export default function AdminDashboardsPage() {
                 {deliverability ? `${Math.round(deliverability.score)}%` : "—"}
               </div>
               <div className="text-xs text-gray-400 mt-1">
-                Trend: {deliverability ? `${deliverability.trend >= 0 ? "+" : ""}${deliverability.trend}%` : "—"}
+                Trend:{" "}
+                {deliverability
+                  ? `${deliverability.trend >= 0 ? "+" : ""}${deliverability.trend}%`
+                  : "—"}
               </div>
             </div>
 
-            {/* simple circular gauge */}
             <div style={{ width: 86, height: 86 }} className="flex items-center justify-center">
               <svg viewBox="0 0 36 36" className="w-20 h-20">
                 <path
@@ -136,7 +113,13 @@ export default function AdminDashboardsPage() {
                   d="M18 2.0845
                      a 15.9155 15.9155 0 0 1 0 31.831"
                   fill="none"
-                  stroke={deliverability && deliverability.score > 90 ? "#16a34a" : deliverability && deliverability.score > 70 ? "#f59e0b" : "#ef4444"}
+                  stroke={
+                    deliverability && deliverability.score > 90
+                      ? "#16a34a"
+                      : deliverability && deliverability.score > 70
+                      ? "#f59e0b"
+                      : "#ef4444"
+                  }
                   strokeWidth="2.8"
                   strokeDasharray={`${deliverability ? deliverability.score : 0}, 100`}
                 />
@@ -148,15 +131,21 @@ export default function AdminDashboardsPage() {
           </div>
         </div>
 
-        <SmallStat title="Last 24h Verifications" value={lastVerificationsSeries.reduce((s: number, p: any) => s + (p.count || 0), 0)} />
+        <SmallStat
+          title="Last 24h Verifications"
+          value={lastVerificationsSeries.reduce(
+            (s: number, p: any) => s + (p.count || 0),
+            0
+          )}
+        />
       </div>
 
-      {/* Charts */}
+      {/* CHARTS */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Line Chart */}
         <Card className="p-4">
           <div className="flex items-center justify-between mb-2">
             <h3 className="text-sm font-semibold">Verifications (recent)</h3>
-            <div className="text-xs text-gray-500">last points</div>
           </div>
 
           <div style={{ height: 220 }}>
@@ -165,25 +154,33 @@ export default function AdminDashboardsPage() {
                 <XAxis dataKey="time" minTickGap={20} />
                 <YAxis />
                 <Tooltip />
-                <Line type="monotone" dataKey="count" stroke="#2563eb" strokeWidth={2} dot={false} />
+                <Line
+                  type="monotone"
+                  dataKey="count"
+                  stroke="#2563eb"
+                  strokeWidth={2}
+                  dot={false}
+                />
               </LineChart>
             </ResponsiveContainer>
           </div>
         </Card>
 
+        {/* Deliverability Breakdown */}
         <Card className="p-4">
           <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-semibold">Deliverability breakdown</h3>
-            <div className="text-xs text-gray-500">valid | risky | invalid</div>
+            <h3 className="text-sm font-semibold">Deliverability Breakdown</h3>
           </div>
 
           <div style={{ height: 220 }}>
             <ResponsiveContainer>
-              <BarChart data={[
-                { name: "valid", value: (lastVerificationsSeries && lastVerificationsSeries.slice(-1)[0]?.valid) || 0 },
-                { name: "risky", value: (lastVerificationsSeries && lastVerificationsSeries.slice(-1)[0]?.risky) || 0 },
-                { name: "invalid", value: (lastVerificationsSeries && lastVerificationsSeries.slice(-1)[0]?.invalid) || 0 },
-              ]}>
+              <BarChart
+                data={[
+                  { name: "valid", value: ws?.lastPoint?.valid || 0 },
+                  { name: "risky", value: ws?.lastPoint?.risky || 0 },
+                  { name: "invalid", value: ws?.lastPoint?.invalid || 0 },
+                ]}
+              >
                 <XAxis dataKey="name" />
                 <YAxis />
                 <Tooltip />
@@ -198,11 +195,11 @@ export default function AdminDashboardsPage() {
         </Card>
       </div>
 
-      {/* Recent actions table */}
+      {/* RECENT EVENTS */}
       <Card className="p-0 overflow-hidden">
         <div className="p-4 border-b flex items-center justify-between">
           <h3 className="text-sm font-semibold">Recent Actions</h3>
-          <div className="text-xs text-gray-500">live feed</div>
+          <div className="text-xs text-gray-500">Live Feed (WebSocket)</div>
         </div>
 
         <table className="w-full text-sm">
@@ -218,7 +215,9 @@ export default function AdminDashboardsPage() {
           <tbody>
             {recentEvents.length === 0 && (
               <tr>
-                <td colSpan={5} className="p-6 text-center text-gray-500">No recent events</td>
+                <td colSpan={5} className="p-6 text-center text-gray-500">
+                  No recent events
+                </td>
               </tr>
             )}
 
