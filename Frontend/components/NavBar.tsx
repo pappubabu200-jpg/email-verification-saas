@@ -206,3 +206,83 @@ export default function NavBar() {
     </header>
   );
 }
+
+"use client";
+
+import { useAuth } from "@/hooks/useAuth";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+
+export default function NavBar() {
+  const router = useRouter();
+  const { user, logout } = useAuth();
+
+  const [open, setOpen] = useState(false);
+
+  const handleLogout = () => {
+    logout();
+    router.push("/auth/send-otp");
+  };
+
+  return (
+    <header className="w-full bg-white shadow-sm h-16 flex items-center justify-between px-6 border-b">
+      {/* Logo */}
+      <div
+        className="text-xl font-semibold cursor-pointer"
+        onClick={() => router.push("/dashboard")}
+      >
+        ZeroVerify.ai
+      </div>
+
+      {/* Right side */}
+      <div className="flex items-center gap-6">
+
+        {/* Credits */}
+        <div className="text-sm text-gray-600">
+          Credits:{" "}
+          <span className="text-blue-600 font-semibold">
+            {user?.credits ?? 0}
+          </span>
+        </div>
+
+        {/* Profile dropdown */}
+        <div className="relative">
+          <button
+            onClick={() => setOpen(!open)}
+            className="flex items-center gap-2 px-3 py-2 rounded hover:bg-gray-100 transition"
+          >
+            <div className="h-8 w-8 rounded-full bg-blue-600 text-white flex items-center justify-center">
+              {user?.email?.[0]?.toUpperCase() || "U"}
+            </div>
+            <span className="text-sm text-gray-700">{user?.email}</span>
+          </button>
+
+          {open && (
+            <div className="absolute right-0 mt-2 w-48 bg-white shadow-md rounded border z-50">
+              <button
+                onClick={() => router.push("/settings")}
+                className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100"
+              >
+                Settings
+              </button>
+
+              <button
+                onClick={() => router.push("/team")}
+                className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100"
+              >
+                Manage Team
+              </button>
+
+              <button
+                onClick={handleLogout}
+                className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50"
+              >
+                Logout
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </header>
+  );
+}
