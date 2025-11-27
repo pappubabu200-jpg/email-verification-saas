@@ -167,4 +167,83 @@ export default function VerifyOtpPage() {
     </div>
   );
                                                                    }
+"use client";
+
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import axios from "@/lib/axios";
+import Input from "@/components/ui/Input";
+import Button from "@/components/ui/Button";
+import ErrorBanner from "@/components/ui/ErrorBanner";
+import SuccessBanner from "@/components/ui/SuccessBanner";
+
+export default function VerifyOtpPage() {
+  const router = useRouter();
+
+  const [email, setEmail] = useState("");
+  const [otp, setOtp] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const handleVerify = async () => {
+    setError(null);
+    setSuccess(null);
+
+    if (!email || !otp) return setError("Enter email & OTP");
+
+    setLoading(true);
+    try {
+      const res = await axios.post("/auth/verify-otp", {
+        email: email.trim(),
+        otp: otp.trim(),
+      });
+
+      const { user_id, email: e } = res.data;
+
+      setSuccess("OTP verified!");
+      setTimeout(() => {
+        router.push(`/auth/set-password?uid=${user_id}&email=${e}`);
+      }, 800);
+    } catch (err: any) {
+      const msg = err.response?.data?.detail || "Invalid OTP";
+      setError(String(msg));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex justify-center items-center bg-gray-50">
+      <div className="w-full max-w-md p-8">
+        <h1 className="text-2xl font-semibold mb-4">Verify OTP</h1>
+
+        {error && <ErrorBanner message={error} />}
+        {success && <SuccessBanner message={success} />}
+
+        <div className="space-y-4">
+          <Input
+            label="Email"
+            type="email"
+            placeholder="name@company.com"
+            value={email}
+            onChange={(e: any) => setEmail(e.target.value)}
+          />
+
+          <Input
+            label="OTP"
+            type="text"
+            placeholder="6 digit code"
+            value={otp}
+            onChange={(e: any) => setOtp(e.target.value)}
+          />
+
+          <Button className="w-full" onClick={handleVerify} disabled={loading}>
+            {loading ? "Verifying..." : "Verify OTP"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
