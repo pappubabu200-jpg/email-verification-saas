@@ -136,3 +136,118 @@ export default function AdminWebhooksPage() {
     }
   }
 }
+
+
+// Frontend/app/admin/webhooks/page.tsx
+"use client";
+
+import { useEffect, useState } from "react";
+import { useAdminWebhooksWS } from "@/hooks/useAdminWebhooksWS";
+import WebhookEventsTable from "@/components/Admin/WebhookEventsTable";
+import Card from "@/components/ui/Card";
+import Button from "@/components/ui/Button";
+import Loader from "@/components/ui/Loader";
+import axios from "@/lib/axios";
+
+export default function AdminWebhooksPage() {
+  const ws = useAdminWebhooksWS();
+  const [loadingInitial, setLoadingInitial] = useState(true);
+  const [initialEvents, setInitialEvents] = useState<any[]>([]);
+  const [filter, setFilter] = useState<"all" | "failed" | "delivered" | "pending">("all");
+
+  useEffect(() => {
+    async function loadRecent() {
+      try {
+        setLoadingInitial(true);
+        const res = await axios.get("/admin/webhooks/recent"); // backend should expose recent events
+        setInitialEvents(res.data.events || []);
+      } catch (err) {
+        console.error("Failed to load recent webhooks", err);
+      } finally {
+        setLoadingInitial(false);
+      }
+    }
+    loadRecent();
+  }, []);
+
+  const combined = [...(ws.events || []), ...initialEvents].reduce((acc: any[], ev: any) => {
+    // de-duplicate by id, keep newest first
+    if (!acc.find((x) => x.id === ev.id)) acc.push(ev);
+    return acc;
+  }, []);
+
+  const filtered = combined.filter((ev) => (filter === "all" ? true : ev.status === filter));
+
+  return (
+    <div className="max-w-6xl mx-auto p-8 space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">Admin — Webhooks</h1>
+          <p className="text-sm text-gray-500">Live webhook events & retry tools</p>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="text-xs text-gray-500">WS: {ws.connected ? "connected" : "disconnected"}</div>
+          <Button onClick={() => ws.clearEvents()}>Clear</Button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <Card className="p-3">
+          <div className="text-xs text-gray-500">Filter</div>
+          <div className="flex gap-2 mt-2">
+            <Button variant={filter === "all" ? "primary" : "secondary"} size="sm" onClick={() => setFilter("all")}>All</Button>
+            <Button variant={filter === "failed" ? "primary" : "secondary"} size="sm" onClick={() => setFilter("failed")}>Failed</Button>
+            <Button variant={filter === "delivered" ? "primary" : "secondary"} size="sm" onClick={() => setFilter("delivered")}>Delivered</Button>
+            <Button variant={filter === "pending" ? "primary" : "secondary"} size="sm" onClick={() => setFilter("pending")}>Pending</Button>
+          </div>
+        </Card>
+
+        <Card className="p-3">
+          <div className="text-xs text-gray-500">Summary</div>
+          <div className="mt-2 text-sm">
+            <div>Total shown: {filtered.length}</div>
+            <div>WS events: {ws.events.length}</div>
+          </div>
+        </Card>
+
+        <Card className="p-3">
+          <div className="text-xs text-gray-500">Actions</div>
+          <div className="mt-2">
+            <Button
+              onClick={async () => {
+                try {
+                  await axios.post("/admin/webhooks/clear-failed");
+                  alert("Requested clearing failed webhooks (backend action).");
+                } catch (err) {
+                  alert("Clearing failed webhooks request failed.");
+                }
+              }}
+              size="sm"
+              variant="secondary"
+            >
+              Clear failed
+            </Button>
+          </div>
+        </Card>
+      </div>
+
+      {loadingInitial ? (
+        <div className="p-6">
+          <Loader />
+        </div>
+      ) : (
+        <WebhookEventsTable
+          events={filtered}
+          onRetrySuccess={(id) => {
+            // optimistic update - find and mark pending
+            // (a more advanced approach would update by id in the WS state)
+            // do quick UI feedback:
+            // (no-op here)
+            console.log("Retry requested for", id);
+          }}
+        />
+      )}
+    </div>
+  );
+}
