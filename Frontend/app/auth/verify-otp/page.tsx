@@ -62,3 +62,109 @@ export default function VerifyOtpPage() {
     </div>
   );
           }
+"use client";
+
+import { useSearchParams, useRouter } from "next/navigation";
+import { useState, useEffect } from "react";
+import axios from "@/lib/axios";
+
+import Button from "@/components/ui/Button";
+import Input from "@/components/ui/Input";
+import Loader from "@/components/ui/Loader";
+import ErrorBanner from "@/components/ui/ErrorBanner";
+import SuccessBanner from "@/components/ui/SuccessBanner";
+
+export default function VerifyOtpPage() {
+  const params = useSearchParams();
+  const router = useRouter();
+
+  const emailFromQuery = params.get("email") || "";
+  const [email, setEmail] = useState(emailFromQuery);
+  const [otp, setOtp] = useState("");
+
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (emailFromQuery) {
+      setEmail(emailFromQuery);
+    }
+  }, [emailFromQuery]);
+
+  const handleVerify = async () => {
+    setError(null);
+    setSuccess(null);
+
+    if (!email || !otp) {
+      setError("Email and OTP are required.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await axios.post("/auth/verify-otp", {
+        email: email,
+        otp: otp,
+        create_team: true,
+      });
+
+      setSuccess("OTP verified successfully!");
+      const userId = res.data?.user_id;
+
+      // redirect to set password page
+      setTimeout(() => {
+        router.push(`/auth/set-password?email=${encodeURIComponent(email)}&uid=${userId}`);
+      }, 800);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || "Invalid OTP.";
+      setError(String(detail));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <main className="w-full max-w-md p-8">
+        <h1 className="text-2xl font-semibold mb-4">Verify OTP</h1>
+        <p className="text-sm text-gray-500 mb-6">Enter the 6-digit code sent to your business email.</p>
+
+        {error && <ErrorBanner message={error} />}
+        {success && <SuccessBanner message={success} />}
+
+        <div className="space-y-4">
+          <Input
+            label="Business email"
+            type="email"
+            value={email}
+            onChange={(e: any) => setEmail(e.target.value)}
+            placeholder="name@company.com"
+            disabled
+          />
+
+          <Input
+            label="OTP"
+            type="text"
+            value={otp}
+            maxLength={6}
+            onChange={(e: any) => setOtp(e.target.value)}
+            placeholder="123456"
+          />
+
+          <Button onClick={handleVerify} disabled={loading} className="w-full">
+            {loading ? <div className="flex items-center gap-2"><Loader /> Verifying...</div> : "Verify OTP"}
+          </Button>
+
+          <button
+            onClick={() => router.push(`/auth/send-otp`)}
+            className="text-sm text-blue-600 underline mt-3"
+          >
+            Resend OTP
+          </button>
+        </div>
+      </main>
+    </div>
+  );
+                                                                   }
+
