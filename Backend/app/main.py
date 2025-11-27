@@ -435,3 +435,12 @@ app.add_middleware(LiveRequestLoggerMiddleware)
 #     return {"message": "Hello World"}
 
 # ... rest of your application code
+from fastapi import WebSocket, WebSocketDisconnect, Depends, HTTPException
+from backend.app.services.ws.api_logs_ws import api_logs_ws
+from backend.app.services.ws.api_logs_pubsub import subscribe_and_forward
+from backend.app.utils.security import verify_admin_token  # YOU ALREADY HAVE JWT SERVICE
+
+@app.on_event("startup")
+async def start_pubsub_background():
+    import asyncio
+    asyncio.create_task(subscribe_and_forward(api_logs_ws))
