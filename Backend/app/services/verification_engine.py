@@ -35,7 +35,7 @@ BASIC_EMAIL_REGEX = re.compile(r"^[^@]+@[^@]+\.[^@.]+$", re.IGNORECASE)
 
 from backend.app.db import SessionLocal
 from backend.app.models.verification_result import VerificationResult
-
+from backend.app.services.verification_ws_manager import verification_ws
 from backend.app.services.cache import get_cached, set_cached
 from backend.app.services.mx_lookup import choose_mx_for_domain
 from backend.app.services.smtp_probe import smtp_probe
@@ -277,3 +277,14 @@ def verify_email_sync(email: str, user_id: Optional[int] = None) -> Dict[str, An
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(asyncio.run, verify_email_async(email, user_id))
             return future.result()
+
+await verification_ws.push(
+    user_id,
+    {
+        "event": "single_verification",
+        "email": email,
+        "status": result["status"],
+        "score": result.get("risk_score", 0),
+        "ts": datetime.utcnow().isoformat()
+    }
+    )
