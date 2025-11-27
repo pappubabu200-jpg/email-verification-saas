@@ -37,3 +37,18 @@ export default function ErrorBanner({ message }: Props) {
     </div>
   );
 }
+"use client";
+
+interface Props {
+  message: string;
+}
+
+export default function ErrorBanner({ message }: Props) {
+  if (!message) return null;
+
+  return (
+    <div className="w-full p-3 mb-4 rounded-md bg-red-100 border border-red-300 text-red-700 text-sm">
+      {message}
+    </div>
+  );
+}
