@@ -16,3 +16,10 @@ export default function Loader({ size = 20 }: { size?: number }) {
     />
   );
 }
+"use client";
+
+export default function Loader() {
+  return (
+    <div className="h-5 w-5 border-2 border-gray-300 border-t-blue-600 rounded-full animate-spin" />
+  );
+}
