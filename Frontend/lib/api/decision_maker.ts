@@ -123,3 +123,9 @@ export async function getDecisionMakerDetail(uid: string) {
   const res = await axios.get(`/decision-maker/${encodeURIComponent(uid)}`);
   return res.data as any;
 }
+import axios from "@/lib/axios";
+
+export const searchDM = (params: any) => axios.get("/decision-maker/search", { params });
+export const enrichDM = (idOrEmail: string) => axios.post("/decision-maker/enrich", { id: idOrEmail });
+export const getDM = (id: string) => axios.get(`/decision-maker/${id}`);
+export const companySuggest = (q: string) => axios.get("/decision-maker/company-suggest", { params: { q }});
