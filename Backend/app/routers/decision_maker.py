@@ -87,3 +87,20 @@ async def dm_detail(uid: str, user=Depends(get_current_user_optional)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.post("/{uid}/refresh")
+async def dm_refresh(uid: str, user=Depends(get_current_user_optional)):
+    """
+    Trigger background enrichment job (non-blocking).
+    Frontend polls for updated details.
+    """
+    from backend.app.workers.decision_maker_tasks import dm_enrich_async
+
+    user_id = getattr(user, "id", None) if user else None
+
+    # enqueue async job
+    dm_enrich_async.delay(uid, user_id)
+
+    return {"queued": True, "uid": uid}
+
+    
