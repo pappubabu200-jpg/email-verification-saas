@@ -28,8 +28,11 @@ from backend.app.services.team_billing_service import (
     release_reservation_by_job as release_team_reservation
 )
 
-# ⭐ NEW: WebSocket Broadcast Manager
+# ⭐ WebSocket Managers
 from backend.app.services.bulk_ws_manager import bulk_ws_manager
+from backend.app.services.verification_ws_manager import verification_ws
+
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +46,6 @@ def _dec(x):
 
 @celery_app.task(bind=True, name="bulk.process_bulk_task", max_retries=2)
 def process_bulk_task(self, job_id: str):
-    """
-    BULK EMAIL VERIFICATION WORKER (WITH REAL-TIME WEBSOCKETS)
-    -----------------------------------------------------------
-    ✓ Reads CSV/ZIP
-    ✓ Verifies emails one-by-one
-    ✓ Saves output to MinIO
-    ✓ Charges credits correctly
-    ✓ Streams progress to WebSocket clients
-    """
     logger.info(f"[Worker] Starting job {job_id}")
 
     db = SessionLocal()
@@ -60,22 +54,24 @@ def process_bulk_task(self, job_id: str):
         if not job:
             logger.error(f"Job not found: {job_id}")
 
-            # WS: notify error
+            # WS broadcast (Bulk + User)
             try:
-                import asyncio
-                asyncio.run(
-                    bulk_ws_manager.broadcast(job_id, {
-                        "event": "failed",
-                        "error": "job_not_found"
-                    })
-                )
+                asyncio.run(bulk_ws_manager.broadcast(job_id, {
+                    "event": "failed",
+                    "error": "job_not_found"
+                }))
+                asyncio.run(verification_ws.push(job.user_id, {
+                    "event": "bulk_failed",
+                    "job_id": job_id,
+                    "error": "job_not_found"
+                }))
             except:
                 pass
 
             return {"error": "job_not_found"}
 
         # --------------------------------------------------------
-        # 1) LOAD INPUT FILE
+        # 1) Load input file
         # --------------------------------------------------------
         try:
             if str(job.input_path).startswith("s3://"):
@@ -85,27 +81,27 @@ def process_bulk_task(self, job_id: str):
             else:
                 with open(job.input_path, "rb") as fh:
                     content = fh.read()
+
         except Exception as e:
             logger.exception("Input read failed: %s", e)
-
             job.status = "error"
             job.error_message = "input_read_failed"
             db.commit()
 
-            # WS error
-            try:
-                import asyncio
-                asyncio.run(bulk_ws_manager.broadcast(job_id, {
-                    "event": "failed",
-                    "error": "input_read_failed"
-                }))
-            except:
-                pass
-
+            # WS failure broadcast
+            asyncio.run(bulk_ws_manager.broadcast(job_id, {
+                "event": "failed",
+                "error": "input_read_failed"
+            }))
+            asyncio.run(verification_ws.push(job.user_id, {
+                "event": "bulk_failed",
+                "job_id": job_id,
+                "error": "input_read_failed"
+            }))
             return {"error": "input_read_failed"}
 
         # --------------------------------------------------------
-        # 2) PARSE EMAILS
+        # 2) Parse file
         # --------------------------------------------------------
         emails = []
         filename = job.input_path.split("/")[-1].lower()
@@ -122,26 +118,22 @@ def process_bulk_task(self, job_id: str):
                         reader = csv.reader(io.StringIO(raw))
                         for row in reader:
                             for col in row:
-                                col_stripped = col.strip()
-                                if "@" in col_stripped:
-                                    emails.append(col_stripped)
+                                if "@" in col.strip():
+                                    emails.append(col.strip())
                                     break
                     else:
                         for line in raw.splitlines():
-                            line_stripped = line.strip()
-                            if "@" in line_stripped:
-                                emails.append(line_stripped)
+                            if "@" in line.strip():
+                                emails.append(line.strip())
 
             elif filename.endswith(".csv"):
                 raw = content.decode("utf-8", errors="ignore")
                 reader = csv.reader(io.StringIO(raw))
                 for row in reader:
                     for col in row:
-                        col_stripped = col.strip()
-                        if "@" in col_stripped:
-                            emails.append(col_stripped)
+                        if "@" in col.strip():
+                            emails.append(col.strip())
                             break
-
             else:
                 raw = content.decode("utf-8", errors="ignore")
                 for line in raw.splitlines():
@@ -150,24 +142,23 @@ def process_bulk_task(self, job_id: str):
 
         except Exception as e:
             logger.exception("Parse failed: %s", e)
-
             job.status = "error"
             job.error_message = "parse_failed"
             db.commit()
 
-            # WS error
-            try:
-                import asyncio
-                asyncio.run(bulk_ws_manager.broadcast(job_id, {
-                    "event": "failed",
-                    "error": "parse_failed"
-                }))
-            except:
-                pass
+            asyncio.run(bulk_ws_manager.broadcast(job_id, {
+                "event": "failed",
+                "error": "parse_failed"
+            }))
+            asyncio.run(verification_ws.push(job.user_id, {
+                "event": "bulk_failed",
+                "job_id": job_id,
+                "error": "parse_failed"
+            }))
 
             return {"error": "parse_failed"}
 
-        # Dedupe
+        # Deduplicate emails
         emails = list(dict.fromkeys([e.lower() for e in emails if "@" in e]))
         total = len(emails)
 
@@ -176,28 +167,26 @@ def process_bulk_task(self, job_id: str):
             job.error_message = "no_valid_emails"
             db.commit()
 
-            try:
-                import asyncio
-                asyncio.run(bulk_ws_manager.broadcast(job_id, {
-                    "event": "failed",
-                    "error": "no_valid_emails"
-                }))
-            except:
-                pass
-
+            asyncio.run(bulk_ws_manager.broadcast(job_id, {
+                "event": "failed",
+                "error": "no_valid_emails"
+            }))
+            asyncio.run(verification_ws.push(job.user_id, {
+                "event": "bulk_failed",
+                "job_id": job_id,
+                "error": "no_valid_emails"
+            }))
             return {"error": "no_valid_emails"}
 
         logger.info(f"[Worker] Job {job_id}: Found {total} emails")
 
         # --------------------------------------------------------
-        # 3) VERIFY EMAILS (REAL-TIME WEBSOCKET UPDATES HERE)
+        # 3) Verification Loop (WebSocket updates here)
         # --------------------------------------------------------
         processed = 0
         valid = 0
         invalid = 0
         results = []
-
-        import asyncio
 
         for e in emails:
             try:
@@ -211,25 +200,31 @@ def process_bulk_task(self, job_id: str):
                     invalid += 1
 
             except Exception as ex:
-                logger.exception(f"Verification failed for {e}: {ex}")
                 results.append({"email": e, "error": "verify_failed"})
                 processed += 1
                 invalid += 1
 
-            # ⭐ WS PROGRESS UPDATE
-            try:
-                asyncio.run(bulk_ws_manager.broadcast(job_id, {
-                    "event": "progress",
-                    "processed": processed,
-                    "total": total,
+            # ⭐ WS PROGRESS
+            update_payload = {
+                "event": "progress",
+                "processed": processed,
+                "total": total,
+                "stats": {
                     "valid": valid,
-                    "invalid": invalid
-                }))
-            except:
-                pass
+                    "invalid": invalid,
+                    "remaining": total - processed
+                }
+            }
+
+            asyncio.run(bulk_ws_manager.broadcast(job_id, update_payload))
+            asyncio.run(verification_ws.push(job.user_id, {
+                "event": "bulk_progress",
+                "job_id": job.job_id,
+                **update_payload
+            }))
 
         # --------------------------------------------------------
-        # 4) SAVE OUTPUTS
+        # 4) Save outputs to MinIO
         # --------------------------------------------------------
         try:
             ensure_bucket()
@@ -267,10 +262,10 @@ def process_bulk_task(self, job_id: str):
             put_bytes(csv_obj, csv_buf.getvalue().encode("utf-8"), content_type="text/csv")
 
         except Exception as e:
-            logger.exception(f"Failed saving outputs: {e}")
+            logger.exception("Failed saving outputs: %s", e)
 
         # --------------------------------------------------------
-        # 5) UPDATE JOB
+        # 5) Update DB
         # --------------------------------------------------------
         job.processed = processed
         job.valid = valid
@@ -280,20 +275,22 @@ def process_bulk_task(self, job_id: str):
         db.commit()
 
         # --------------------------------------------------------
-        # 6) WEBSOCKET FINISHED EVENT
+        # 6) WS COMPLETED EVENT (Bulk + User)
         # --------------------------------------------------------
-        try:
-            asyncio.run(bulk_ws_manager.broadcast(job_id, {
-                "event": "completed",
-                "processed": processed,
-                "total": total,
-                "valid": valid,
-                "invalid": invalid
-            }))
-        except:
-            pass
+        completed_payload = {
+            "event": "completed",
+            "processed": processed,
+            "total": total,
+            "stats": {"valid": valid, "invalid": invalid}
+        }
 
-        logger.info(f"[Worker] Finished job {job_id}")
+        asyncio.run(bulk_ws_manager.broadcast(job_id, completed_payload))
+        asyncio.run(verification_ws.push(job.user_id, {
+            "event": "bulk_completed",
+            "job_id": job.job_id,
+            **completed_payload
+        }))
+
         return {
             "job_id": job.job_id,
             "processed": processed,
@@ -302,7 +299,7 @@ def process_bulk_task(self, job_id: str):
         }
 
     except Exception as exc:
-        logger.exception(f"[Worker] Unexpected failure for {job_id}: {exc}")
+        logger.exception(f"[Worker] Failure for job {job_id}: {exc}")
 
         try:
             job = db.query(BulkJob).filter(BulkJob.job_id == job_id).first()
@@ -311,11 +308,14 @@ def process_bulk_task(self, job_id: str):
                 job.error_message = "worker_failed"
                 db.commit()
 
-            # WS fail
-            import asyncio
             asyncio.run(bulk_ws_manager.broadcast(job_id, {
                 "event": "failed",
                 "error": "worker_failed"
+            }))
+            asyncio.run(verification_ws.push(job.user_id, {
+                "event": "bulk_failed",
+                "job_id": job_id,
+                "error": "processing_error"
             }))
 
         except:
