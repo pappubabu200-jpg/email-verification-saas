@@ -79,3 +79,99 @@ export default function SideBar() {
     </>
   );
 }
+
+"use client";
+
+import { usePathname, useRouter } from "next/navigation";
+import {
+  Home,
+  MailCheck,
+  Upload,
+  KeyRound,
+  Users,
+  CreditCard,
+  Settings,
+  Brain,
+  ChevronLeft,
+} from "lucide-react";
+import { useState } from "react";
+
+interface NavItem {
+  label: string;
+  href: string;
+  icon: any;
+}
+
+const navItems: NavItem[] = [
+  { label: "Dashboard", href: "/dashboard", icon: Home },
+  { label: "Verify Email", href: "/verification", icon: MailCheck },
+  { label: "Bulk Verification", href: "/bulk", icon: Upload },
+  { label: "Decision Maker Finder", href: "/decision-maker", icon: Brain },
+  { label: "API Keys", href: "/api-keys", icon: KeyRound },
+  { label: "Team", href: "/team", icon: Users },
+  { label: "Billing", href: "/billing", icon: CreditCard },
+  { label: "Settings", href: "/settings", icon: Settings },
+];
+
+export default function SideBar() {
+  const pathname = usePathname();
+  const router = useRouter();
+
+  const [collapsed, setCollapsed] = useState(false);
+
+  return (
+    <aside
+      className={`
+        h-screen bg-white border-r shadow-sm flex flex-col transition-all duration-200
+        ${collapsed ? "w-16" : "w-64"}
+      `}
+    >
+      {/* Header Logo + Collapse Button */}
+      <div className="flex items-center justify-between px-4 h-14 border-b">
+        <span
+          className={`font-bold text-xl text-gray-800 transition-opacity ${
+            collapsed ? "opacity-0 hidden" : "opacity-100"
+          }`}
+        >
+          ZeroVerify
+        </span>
+
+        <button
+          onClick={() => setCollapsed(!collapsed)}
+          className="p-2 hover:bg-gray-100 rounded-md"
+        >
+          <ChevronLeft
+            size={20}
+            className={`${collapsed ? "rotate-180" : ""} transition-transform`}
+          />
+        </button>
+      </div>
+
+      {/* Navigation Links */}
+      <nav className="mt-4 flex-1">
+        {navItems.map((item) => {
+          const Icon = item.icon;
+          const active = pathname.startsWith(item.href);
+
+          return (
+            <button
+              key={item.href}
+              onClick={() => router.push(item.href)}
+              className={`
+                w-full flex items-center gap-3 px-4 py-3 text-left transition-all
+                ${
+                  active
+                    ? "bg-blue-50 text-blue-700 font-medium"
+                    : "text-gray-600 hover:bg-gray-100"
+                }
+              `}
+            >
+              <Icon size={20} />
+              {!collapsed && <span>{item.label}</span>}
+            </button>
+          );
+        })}
+      </nav>
+    </aside>
+  );
+}
