@@ -127,3 +127,23 @@ def list_my_jobs(
             .limit(per_page)\
             .offset((page - 1) * per_page)\
             .all()
+
+from backend.app.services.ws.admin_metrics_ws import admin_metrics_ws
+
+@app.on_after_configure.connect
+def setup_periodic_tasks(sender, **kwargs):
+    sender.add_periodic_task(5.0, send_admin_metrics.s())
+
+@celery_app.task
+def send_admin_metrics():
+    # read stats from DB or Redis
+    payload = {
+        "type": "metrics",
+        "credits": {...},
+        "verifications": [...],
+        "deliverability": {...},
+        "events": [...]
+    }
+    asyncio.run(admin_metrics_ws.broadcast(payload))
+
+
