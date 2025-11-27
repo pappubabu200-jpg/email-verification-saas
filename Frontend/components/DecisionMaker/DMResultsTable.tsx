@@ -175,3 +175,83 @@ function WorkTab({ dm }: { dm: DecisionMakerResult }) {
   );
 }
 
+
+"use client";
+
+import React from "react";
+import Card from "@/components/ui/Card";
+import Button from "@/components/ui/Button";
+
+export default function DMResultsTable({
+  items,
+  page,
+  total,
+  onPage,
+  onSelect,
+}: {
+  items: any[];
+  page: number;
+  total: number;
+  onPage: (p: number) => void;
+  onSelect: (item: any) => void;
+}) {
+  const totalPages = Math.max(1, Math.ceil((total || items.length) / 20));
+
+  return (
+    <Card className="p-0 overflow-hidden">
+      <table className="w-full text-sm">
+        <thead className="bg-gray-50">
+          <tr>
+            <th className="p-3 text-left">Name</th>
+            <th className="p-3 text-left">Title</th>
+            <th className="p-3 text-left">Company</th>
+            <th className="p-3 text-left">Email</th>
+            <th className="p-3 text-left">Actions</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          {items.map((it: any, idx: number) => (
+            <tr key={idx} className="border-b hover:bg-gray-50">
+              <td className="p-3">{it.name || "-"}</td>
+              <td className="p-3">{it.title || "-"}</td>
+              <td className="p-3">{it.company || "-"}</td>
+              <td className="p-3">{it.email || "-"}</td>
+              <td className="p-3">
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => onSelect(it)}>View</Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      // trigger enrichment
+                      fetch("/decision-maker/enrich", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ id: it.id || it.email }),
+                      }).then(() => {
+                        // feedback maybe handled via WS
+                      });
+                    }}
+                  >
+                    Enrich
+                  </Button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {/* pagination */}
+      <div className="p-3 flex items-center justify-between">
+        <div className="text-xs text-gray-500">Showing page {page} / {totalPages}</div>
+        <div className="flex gap-2">
+          <Button size="sm" disabled={page <= 1} onClick={() => onPage(page - 1)}>Prev</Button>
+          <Button size="sm" disabled={page >= totalPages} onClick={() => onPage(page + 1)}>Next</Button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
