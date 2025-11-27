@@ -314,3 +314,25 @@ def enrich_dm_task(self, dm_id: str, task_id: str):
     finally:
         db.close()
 
+# backend/app/workers/decision_maker_tasks.py
+import logging
+from backend.app.celery_app import celery_app
+from backend.app.services.dm_autodiscovery import discover
+
+logger = logging.getLogger(__name__)
+
+
+@celery_app.task(bind=True, name="workers.decision_maker_tasks.autodiscover_job", max_retries=1)
+def autodiscover_job(self, job_id: str, domain: str = None, company_name: str = None, max_results: int = 100, user_id: int = None):
+    """
+    Celery task wrapper for domain/company autodiscovery.
+    """
+    logger.info(f"[DM Worker] Start autodiscover job {job_id} - {domain or company_name}")
+    try:
+        results = discover(domain=domain, company_name=company_name, max_results=max_results, job_id=job_id, user_id=user_id)
+        logger.info(f"[DM Worker] Completed job {job_id} - found {len(results)} items")
+        return {"job_id": job_id, "count": len(results)}
+    except Exception as exc:
+        logger.exception(f"[DM Worker] Failure for job {job_id}: {exc}")
+        # worker-level broadcast and alerts can be done inside discover, but also here if needed
+        raise
