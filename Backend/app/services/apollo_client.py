@@ -100,3 +100,59 @@ async def apollo_search_people(domain: str, limit: int = 10) -> List[Dict[str, A
     except Exception as e:
         logger.exception(f"Apollo search failed: {e}")
         return []
+# backend/app/services/apollo_client.py
+import os
+import logging
+from typing import Optional, Dict, Any
+import httpx
+from backend.app.config import settings
+
+logger = logging.getLogger(__name__)
+
+APOLLO_API_KEY = os.getenv("APOLLO_API_KEY", getattr(settings, "APOLLO_API_KEY", None))
+APOLLO_BASE = os.getenv("APOLLO_BASE_URL", "https://api.apollo.io/v1")
+
+# Simple async client for searching person data (name/company/email)
+async def apollo_search_person(query: str, limit: int = 10) -> Optional[Dict[str, Any]]:
+    """
+    Query Apollo People/Enrichment endpoints.
+    Returns dict or None on failure.
+    """
+    if not APOLLO_API_KEY:
+        logger.debug("Apollo API key not configured")
+        return None
+
+    url = f"{APOLLO_BASE}/people/search"
+    headers = {"Authorization": f"Bearer {APOLLO_API_KEY}", "Accept": "application/json"}
+    params = {"q": query, "per_page": limit}
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(url, headers=headers, params=params)
+            r.raise_for_status()
+            return r.json()
+    except httpx.HTTPStatusError as e:
+        logger.warning("Apollo API status %s: %s", e.response.status_code, e)
+    except Exception as e:
+        logger.exception("Apollo API error: %s", e)
+    return None
+
+
+async def apollo_enrich_person_by_email(email: str) -> Optional[Dict[str, Any]]:
+    """
+    Enrich a single person by email if Apollo supports it.
+    Returns normalized dict or None.
+    """
+    if not APOLLO_API_KEY:
+        return None
+    url = f"{APOLLO_BASE}/people/lookup"
+    headers = {"Authorization": f"Bearer {APOLLO_API_KEY}"}
+    params = {"email": email}
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(url, headers=headers, params=params)
+            r.raise_for_status()
+            return r.json()
+    except Exception as e:
+        logger.debug("Apollo enrich failed for %s: %s", email, e)
+        return None
