@@ -56,3 +56,34 @@ async def list_decision_makers(
     repo = DecisionMakerRepository(db)
     dms = await repo.get_by_user(current_user.id)
     return [DecisionMakerResponse.from_orm(i) for i in dms]
+
+# backend/app/routers/decision_maker.py
+from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Optional
+from backend.app.services.decision_maker_service import search_decision_makers, get_decision_maker_detail
+from backend.app.utils.security import get_current_user_optional  # adapt to your auth helper
+
+router = APIRouter(prefix="/decision-maker", tags=["decision_maker"])
+
+
+@router.get("/search")
+async def dm_search(q: str = Query(..., min_length=2), limit: int = Query(10, ge=1, le=50), user=Depends(get_current_user_optional)):
+    user_id = getattr(user, "id", None) if user else None
+    try:
+        results = await search_decision_makers(q, user_id=user_id, limit=limit)
+        return {"results": results}
+    except Exception as e:
+        raise HTTPException(status_code=429 if "Rate limit" in str(e) else 500, detail=str(e))
+
+
+@router.get("/{uid}")
+async def dm_detail(uid: str, user=Depends(get_current_user_optional)):
+    user_id = getattr(user, "id", None) if user else None
+    try:
+        detail = await get_decision_maker_detail(uid, user_id=user_id)
+        if not detail:
+            raise HTTPException(status_code=404, detail="Not found")
+        return detail
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
