@@ -182,3 +182,46 @@ export default function DecisionMakerDetailPage() {
     </div>
   );
 }
+
+"use client";
+
+import { useEffect, useState } from "react";
+import { useParams } from "next/navigation";
+import axios from "@/lib/axios";
+import DMDetailTabs from "@/components/DecisionMaker/DMDetailTabs";
+
+export default function DMDetailPage() {
+  const { id } = useParams();
+  const [dm, setDm] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await axios.get(`/decision-maker/${id}`);
+        setDm(res.data);
+      } catch (err) {
+        console.error("Failed to load decision-maker details", err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, [id]);
+
+  if (loading) return <p className="p-8">Loading...</p>;
+  if (!dm) return <p className="p-8 text-red-600">Not found</p>;
+
+  return (
+    <div className="max-w-2xl mx-auto p-8">
+      <h1 className="text-3xl font-semibold">{dm.name}</h1>
+      <p className="text-gray-600">
+        {dm.title} @ {dm.company}
+      </p>
+
+      {/* TABS */}
+      <DMDetailTabs dm={dm} />
+    </div>
+  );
+}
+
