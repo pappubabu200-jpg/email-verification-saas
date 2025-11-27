@@ -444,3 +444,35 @@ from backend.app.utils.security import verify_admin_token  # YOU ALREADY HAVE JW
 async def start_pubsub_background():
     import asyncio
     asyncio.create_task(subscribe_and_forward(api_logs_ws))
+
+@app.websocket("/ws/admin/apilogs")
+async def admin_apilogs_socket(ws: WebSocket):
+
+    # -------------------------
+    # ADMIN AUTH CHECK
+    # -------------------------
+    token = ws.headers.get("authorization") or ""
+    if not token.startswith("Bearer "):
+        await ws.close(code=4403)
+        return
+
+    token = token.replace("Bearer ", "").strip()
+    try:
+        payload = verify_admin_token(token)
+        if payload.get("role") != "admin":
+            await ws.close(code=4403)
+            return
+    except Exception:
+        await ws.close(code=4403)
+        return
+
+    # -------------------------
+    # ACCEPT CONNECTION
+    # -------------------------
+    await api_logs_ws.connect(ws)
+
+    try:
+        while True:
+            await ws.receive_text()  # ignore, keep alive
+    except WebSocketDisconnect:
+        await api_logs_ws.disconnect(ws)
