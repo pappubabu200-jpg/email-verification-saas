@@ -42,3 +42,43 @@ export default function Badge({
     </span>
   );
 }
+
+"use client";
+
+import React from "react";
+import clsx from "clsx";
+
+type BadgeVariant =
+  | "success"
+  | "warning"
+  | "danger"
+  | "info"
+  | "neutral";
+
+interface BadgeProps {
+  text: string;
+  variant?: BadgeVariant;
+  className?: string;
+}
+
+const variantStyles: Record<BadgeVariant, string> = {
+  success: "bg-green-100 text-green-700 border border-green-300",
+  warning: "bg-yellow-100 text-yellow-700 border border-yellow-300",
+  danger:  "bg-red-100 text-red-700 border border-red-300",
+  info:    "bg-blue-100 text-blue-700 border border-blue-300",
+  neutral: "bg-gray-100 text-gray-700 border border-gray-300",
+};
+
+export default function Badge({ text, variant = "neutral", className }: BadgeProps) {
+  return (
+    <span
+      className={clsx(
+        "px-2 py-1 rounded-md text-xs font-medium",
+        variantStyles[variant],
+        className
+      )}
+    >
+      {text}
+    </span>
+  );
+        }
