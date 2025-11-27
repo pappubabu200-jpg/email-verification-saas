@@ -383,3 +383,55 @@ async def admin_webhooks_socket(ws: WebSocket):
 
 app.include_router(ws_router)
 
+from fastapi import WebSocket, APIRouter
+from backend.app.services.ws.api_logs_ws import api_logs_ws
+
+ws_router = APIRouter()
+
+@ws_router.websocket("/ws/admin/apilogs")
+async def admin_apilogs_socket(ws: WebSocket):
+    # TODO: protect with admin-only auth (cookie/headers). This currently accepts any connection.
+    await api_logs_ws.connect(ws)
+    try:
+        while True:
+            # keep connection alive; optionally handle ping messages
+            await ws.receive_text()
+    except Exception:
+       
+        pass
+    finally:
+        await api_logs_ws.disconnect(ws)
+
+# include router (if not already)
+app.include_router(ws_router)
+
+# Example of where you would register the middleware in your main application file.
+# Note: This file name is illustrative; your actual file might be named differently (e.g., app.py).
+
+from fastapi import FastAPI
+# Assuming LiveRequestLoggerMiddleware is correctly imported
+from backend.app.middleware.live_request_logger import LiveRequestLoggerMiddleware
+
+# Initialize your FastAPI application
+app = FastAPI(
+    title="My API",
+    version="1.0.0",
+    # other configuration...
+)
+
+# --- Middleware Registration ---
+
+# Add the LiveRequestLoggerMiddleware to the application stack.
+# Middleware are processed in reverse order of addition for response (inner to outer).
+# This logger will be executed for every incoming HTTP request.
+# It captures request/response details and broadcasts them in real-time
+# to any listening admin WebSockets.
+app.add_middleware(LiveRequestLoggerMiddleware)
+
+# --- Other application setup (routers, events, etc.) ---
+
+# @app.get("/")
+# async def read_root():
+#     return {"message": "Hello World"}
+
+# ... rest of your application code
