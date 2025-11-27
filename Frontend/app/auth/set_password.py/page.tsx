@@ -166,3 +166,81 @@ export default function SetPasswordPage() {
     </div>
   );
   }
+"use client";
+
+import { useSearchParams, useRouter } from "next/navigation";
+import { useState } from "react";
+import axios from "@/lib/axios";
+
+import Input from "@/components/ui/Input";
+import Button from "@/components/ui/Button";
+import ErrorBanner from "@/components/ui/ErrorBanner";
+import SuccessBanner from "@/components/ui/SuccessBanner";
+
+export default function SetPasswordPage() {
+  const params = useSearchParams();
+  const router = useRouter();
+
+  const email = params.get("email") || "";
+  const userId = params.get("uid") || "";
+
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const handleSubmit = async () => {
+    setError(null);
+    setSuccess(null);
+
+    if (password !== confirm) return setError("Passwords do not match.");
+    if (password.length < 6) return setError("Password must be ≥ 6 characters.");
+
+    setLoading(true);
+    try {
+      await axios.post("/auth/set-password", {
+        user_id: Number(userId),
+        password,
+      });
+
+      setSuccess("Password created!");
+
+      setTimeout(() => router.push("/auth/login"), 800);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || "Failed to set password.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex justify-center items-center bg-gray-50">
+      <div className="w-full max-w-md p-8">
+        <h1 className="text-2xl font-semibold mb-3">Create Password</h1>
+
+        {error && <ErrorBanner message={error} />}
+        {success && <SuccessBanner message={success} />}
+
+        <div className="space-y-4">
+          <Input
+            type="password"
+            label="Password"
+            onChange={(e: any) => setPassword(e.target.value)}
+          />
+
+          <Input
+            type="password"
+            label="Confirm Password"
+            onChange={(e: any) => setConfirm(e.target.value)}
+          />
+
+          <Button className="w-full" onClick={handleSubmit} disabled={loading}>
+            {loading ? "Saving..." : "Set Password"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
