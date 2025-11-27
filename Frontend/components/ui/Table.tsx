@@ -180,5 +180,79 @@ export default function Table({
     </div>
   );
                                                         }
+"use client";
+
+import React from "react";
+import clsx from "clsx";
+
+export interface Column<T> {
+  key: string;
+  label: string;
+  className?: string;
+  render?: (row: T) => React.ReactNode;
+}
+
+interface TableProps<T> {
+  columns: Column<T>[];
+  data: T[];
+  onRowClick?: (row: T) => void;
+  emptyText?: string;
+}
+
+export default function Table<T>({
+  columns,
+  data,
+  onRowClick,
+  emptyText = "No records found.",
+}: TableProps<T>) {
+  return (
+    <div className="w-full overflow-x-auto rounded-lg border border-gray-200 bg-white shadow-sm">
+      <table className="min-w-full text-sm">
+        <thead className="bg-gray-100 text-gray-700 border-b">
+          <tr>
+            {columns.map((col) => (
+              <th
+                key={col.key}
+                className={clsx("px-4 py-3 font-semibold text-left", col.className)}
+              >
+                {col.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+
+        <tbody>
+          {data.length === 0 ? (
+            <tr>
+              <td
+                colSpan={columns.length}
+                className="text-center py-6 text-gray-500"
+              >
+                {emptyText}
+              </td>
+            </tr>
+          ) : (
+            data.map((row: any, idx: number) => (
+              <tr
+                key={idx}
+                onClick={() => onRowClick?.(row)}
+                className={clsx(
+                  "border-b hover:bg-gray-50 transition cursor-pointer",
+                  idx % 2 === 0 ? "bg-white" : "bg-gray-50"
+                )}
+              >
+                {columns.map((col) => (
+                  <td key={col.key} className={clsx("px-4 py-3", col.className)}>
+                    {col.render ? col.render(row) : String(row[col.key] ?? "")}
+                  </td>
+                ))}
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+                }
 
 
