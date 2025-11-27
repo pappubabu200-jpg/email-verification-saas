@@ -345,3 +345,11 @@ from backend.app.api.v1 import admin_webhook_dlq
 app.include_router(admin_webhook_dlq.router)
 from backend.app.routers import auth_password
 app.include_router(auth_password.router)
+### admin metrics 
+
+from backend.app.workers.admin_metrics_live import admin_metrics_loop
+
+@app.on_event("startup")
+async def _start_metrics_loop():
+    asyncio.create_task(admin_metrics_loop())
+    
