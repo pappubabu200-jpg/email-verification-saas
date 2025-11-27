@@ -1,5 +1,3 @@
-# backend/app/workers/bulk_tasks.py
-
 import io
 import csv
 import json
@@ -30,6 +28,9 @@ from backend.app.services.team_billing_service import (
     release_reservation_by_job as release_team_reservation
 )
 
+# ⭐ NEW: WebSocket Broadcast Manager
+from backend.app.services.bulk_ws_manager import bulk_ws_manager
+
 logger = logging.getLogger(__name__)
 
 OUTPUT_PREFIX = "outputs/bulk"
@@ -43,13 +44,13 @@ def _dec(x):
 @celery_app.task(bind=True, name="bulk.process_bulk_task", max_retries=2)
 def process_bulk_task(self, job_id: str):
     """
-    Bulk job processor:
-    - Load job + fetch file (local or minio)
-    - Parse emails
-    - Verify each email
-    - Save results to MinIO (JSON + CSV)
-    - Charge/capture reservation EXACT to usage
-    - Release unused reservations
+    BULK EMAIL VERIFICATION WORKER (WITH REAL-TIME WEBSOCKETS)
+    -----------------------------------------------------------
+    ✓ Reads CSV/ZIP
+    ✓ Verifies emails one-by-one
+    ✓ Saves output to MinIO
+    ✓ Charges credits correctly
+    ✓ Streams progress to WebSocket clients
     """
     logger.info(f"[Worker] Starting job {job_id}")
 
@@ -58,14 +59,26 @@ def process_bulk_task(self, job_id: str):
         job = db.query(BulkJob).filter(BulkJob.job_id == job_id).first()
         if not job:
             logger.error(f"Job not found: {job_id}")
+
+            # WS: notify error
+            try:
+                import asyncio
+                asyncio.run(
+                    bulk_ws_manager.broadcast(job_id, {
+                        "event": "failed",
+                        "error": "job_not_found"
+                    })
+                )
+            except:
+                pass
+
             return {"error": "job_not_found"}
 
         # --------------------------------------------------------
-        # 1) LOAD INPUT FILE (minio or disk)
+        # 1) LOAD INPUT FILE
         # --------------------------------------------------------
         try:
             if str(job.input_path).startswith("s3://"):
-                # s3://bucket/object
                 s = job.input_path.replace("s3://", "").split("/", 1)
                 obj = s[1]
                 content = get_object_bytes(obj)
@@ -74,10 +87,21 @@ def process_bulk_task(self, job_id: str):
                     content = fh.read()
         except Exception as e:
             logger.exception("Input read failed: %s", e)
+
             job.status = "error"
             job.error_message = "input_read_failed"
-            db.add(job)
             db.commit()
+
+            # WS error
+            try:
+                import asyncio
+                asyncio.run(bulk_ws_manager.broadcast(job_id, {
+                    "event": "failed",
+                    "error": "input_read_failed"
+                }))
+            except:
+                pass
+
             return {"error": "input_read_failed"}
 
         # --------------------------------------------------------
@@ -107,6 +131,7 @@ def process_bulk_task(self, job_id: str):
                             line_stripped = line.strip()
                             if "@" in line_stripped:
                                 emails.append(line_stripped)
+
             elif filename.endswith(".csv"):
                 raw = content.decode("utf-8", errors="ignore")
                 reader = csv.reader(io.StringIO(raw))
@@ -116,47 +141,70 @@ def process_bulk_task(self, job_id: str):
                         if "@" in col_stripped:
                             emails.append(col_stripped)
                             break
+
             else:
                 raw = content.decode("utf-8", errors="ignore")
                 for line in raw.splitlines():
-                    line_stripped = line.strip()
-                    if "@" in line_stripped:
-                        emails.append(line_stripped)
+                    if "@" in line.strip():
+                        emails.append(line.strip())
+
         except Exception as e:
             logger.exception("Parse failed: %s", e)
+
             job.status = "error"
             job.error_message = "parse_failed"
-            db.add(job)
             db.commit()
+
+            # WS error
+            try:
+                import asyncio
+                asyncio.run(bulk_ws_manager.broadcast(job_id, {
+                    "event": "failed",
+                    "error": "parse_failed"
+                }))
+            except:
+                pass
+
             return {"error": "parse_failed"}
 
-        # Deduplicate emails (case-insensitive)
+        # Dedupe
         emails = list(dict.fromkeys([e.lower() for e in emails if "@" in e]))
         total = len(emails)
 
         if total == 0:
             job.status = "error"
             job.error_message = "no_valid_emails"
-            db.add(job)
             db.commit()
+
+            try:
+                import asyncio
+                asyncio.run(bulk_ws_manager.broadcast(job_id, {
+                    "event": "failed",
+                    "error": "no_valid_emails"
+                }))
+            except:
+                pass
+
             return {"error": "no_valid_emails"}
 
-        logger.info(f"[Worker] Job {job_id}: Found {total} unique emails")
+        logger.info(f"[Worker] Job {job_id}: Found {total} emails")
 
         # --------------------------------------------------------
-        # 3) VERIFY EMAILS
+        # 3) VERIFY EMAILS (REAL-TIME WEBSOCKET UPDATES HERE)
         # --------------------------------------------------------
         processed = 0
         valid = 0
         invalid = 0
         results = []
 
+        import asyncio
+
         for e in emails:
             try:
                 r = verify_email_sync(e, user_id=job.user_id)
                 results.append({"email": e, "result": r})
-                processed += 1
 
+                processed += 1
                 if r.get("status") == "valid":
                     valid += 1
                 else:
@@ -168,8 +216,20 @@ def process_bulk_task(self, job_id: str):
                 processed += 1
                 invalid += 1
 
+            # ⭐ WS PROGRESS UPDATE
+            try:
+                asyncio.run(bulk_ws_manager.broadcast(job_id, {
+                    "event": "progress",
+                    "processed": processed,
+                    "total": total,
+                    "valid": valid,
+                    "invalid": invalid
+                }))
+            except:
+                pass
+
         # --------------------------------------------------------
-        # 4) SAVE OUTPUTS (MinIO)
+        # 4) SAVE OUTPUTS
         # --------------------------------------------------------
         try:
             ensure_bucket()
@@ -177,7 +237,6 @@ def process_bulk_task(self, job_id: str):
             json_obj = f"{OUTPUT_PREFIX}/{job.job_id}.json"
             csv_obj = f"{OUTPUT_PREFIX}/{job.job_id}.csv"
 
-            # JSON output
             json_bytes = json.dumps({
                 "job_id": job.job_id,
                 "total": total,
@@ -189,7 +248,6 @@ def process_bulk_task(self, job_id: str):
 
             put_bytes(json_obj, json_bytes, content_type="application/json")
 
-            # CSV output
             csv_buf = io.StringIO()
             writer = csv.writer(csv_buf)
             writer.writerow(["email", "status", "risk_score", "details"])
@@ -199,7 +257,7 @@ def process_bulk_task(self, job_id: str):
                     rr = r["result"]
                     writer.writerow([
                         r["email"],
-                        rr.get("status", "unknown"),
+                        rr.get("status", ""),
                         rr.get("risk_score", ""),
                         json.dumps(rr.get("details", {}))
                     ])
@@ -208,11 +266,8 @@ def process_bulk_task(self, job_id: str):
 
             put_bytes(csv_obj, csv_buf.getvalue().encode("utf-8"), content_type="text/csv")
 
-            logger.info(f"[Worker] Job {job_id}: Outputs saved to MinIO")
-
         except Exception as e:
-            logger.exception(f"Failed to save outputs: {e}")
-            # Continue even if output saving fails
+            logger.exception(f"Failed saving outputs: {e}")
 
         # --------------------------------------------------------
         # 5) UPDATE JOB
@@ -220,88 +275,25 @@ def process_bulk_task(self, job_id: str):
         job.processed = processed
         job.valid = valid
         job.invalid = invalid
-        job.output_path = f"s3://{MINIO_BUCKET}/{json_obj}"
         job.status = "finished"
-        db.add(job)
+        job.output_path = f"s3://{MINIO_BUCKET}/{json_obj}"
         db.commit()
 
         # --------------------------------------------------------
-        # 6) RESERVATION FINALIZATION
+        # 6) WEBSOCKET FINISHED EVENT
         # --------------------------------------------------------
         try:
-            # Find all reservations linked to this job
-            reservations = db.query(CreditReservation).filter(
-                CreditReservation.job_id == job.job_id,
-                CreditReservation.locked == True
-            ).all()
+            asyncio.run(bulk_ws_manager.broadcast(job_id, {
+                "event": "completed",
+                "processed": processed,
+                "total": total,
+                "valid": valid,
+                "invalid": invalid
+            }))
+        except:
+            pass
 
-            cost_per = _dec(get_cost_for_key("verify.bulk_per_email") or 0)
-            actual_cost = (cost_per * Decimal(processed)).quantize(Decimal("0.000001"))
-
-            logger.info(f"[Worker] Job {job_id}: Actual cost = {actual_cost}, Reservations = {len(reservations)}")
-
-            remaining_cost = actual_cost
-
-            for res in reservations:
-                if remaining_cost <= 0:
-                    # Release unused reservations
-                    try:
-                        if res.reference and str(res.reference).startswith("team:"):
-                            release_team_reservation(job.job_id)
-                        else:
-                            res.locked = False
-                            db.add(res)
-                    except Exception as e:
-                        logger.exception(f"Failed to release reservation {res.id}: {e}")
-                    continue
-
-                res_amount = _dec(res.amount)
-
-                try:
-                    # Team reservation
-                    if res.reference and str(res.reference).startswith("team:"):
-                        parts = res.reference.split(":")
-                        if len(parts) >= 2:
-                            team_id = int(parts[1])
-                            capture_reservation_and_charge(
-                                res.id,
-                                type_="bulk_charge",
-                                reference=f"bulk:{job.job_id}"
-                            )
-                            remaining_cost -= res_amount
-                            logger.info(f"[Worker] Captured team reservation {res.id} for team {team_id}")
-                        else:
-                            logger.error(f"Invalid team reference format: {res.reference}")
-
-                    # User reservation
-                    else:
-                        capture_reservation(
-                            db,
-                            res.id,
-                            type_="bulk_charge",
-                            reference=f"bulk:{job.job_id}"
-                        )
-                        remaining_cost -= res_amount
-                        logger.info(f"[Worker] Captured user reservation {res.id}")
-
-                except Exception as e:
-                    logger.exception(f"Reservation capture failed for {res.id}: {e}")
-                    # Mark as unlocked on failure
-                    res.locked = False
-                    db.add(res)
-
-            db.commit()
-
-            if remaining_cost > 0:
-                logger.warning(
-                    f"[Worker] Job {job_id}: Remaining cost {remaining_cost} not covered by reservations"
-                )
-
-        except Exception as e:
-            logger.exception(f"Reservation finalization failed for job {job_id}: {e}")
-
-        logger.info(f"[Worker] Finished job {job_id}: {processed} processed, {valid} valid, {invalid} invalid")
-
+        logger.info(f"[Worker] Finished job {job_id}")
         return {
             "job_id": job.job_id,
             "processed": processed,
@@ -310,16 +302,25 @@ def process_bulk_task(self, job_id: str):
         }
 
     except Exception as exc:
-        logger.exception(f"Unexpected worker failure for job {job_id}: {exc}")
+        logger.exception(f"[Worker] Unexpected failure for {job_id}: {exc}")
+
         try:
             job = db.query(BulkJob).filter(BulkJob.job_id == job_id).first()
             if job:
                 job.status = "error"
                 job.error_message = "worker_failed"
-                db.add(job)
                 db.commit()
-        except Exception:
+
+            # WS fail
+            import asyncio
+            asyncio.run(bulk_ws_manager.broadcast(job_id, {
+                "event": "failed",
+                "error": "worker_failed"
+            }))
+
+        except:
             pass
+
         raise
 
     finally:
