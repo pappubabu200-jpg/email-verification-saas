@@ -137,3 +137,36 @@ export default function DashboardPage() {
     </div>
   );
 }
+
+"use client";
+
+import CreditsWidget from "@/components/DashboardWidgets/CreditsWidget";
+import LastVerificationWidget from "@/components/DashboardWidgets/LastVerificationWidget";
+import DeliverabilityDonut from "@/components/DashboardWidgets/DeliverabilityDonut";
+import BulkMiniWidget from "@/components/DashboardWidgets/BulkMiniWidget";
+import ActivityFeed from "@/components/DashboardWidgets/ActivityFeed";
+import useAuth from "@/hooks/useAuth";
+
+export default function DashboardPage() {
+  const { user } = useAuth();
+
+  if (!user) return null;
+
+  return (
+    <div className="max-w-7xl mx-auto p-8 space-y-8">
+      <h1 className="text-2xl font-semibold">Dashboard</h1>
+
+      {/* GRID LAYOUT */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <CreditsWidget userId={user.id} />
+        <LastVerificationWidget userId={user.id} />
+        <DeliverabilityDonut userId={user.id} />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <BulkMiniWidget userId={user.id} />
+        <ActivityFeed userId={user.id} />
+      </div>
+    </div>
+  );
+}
