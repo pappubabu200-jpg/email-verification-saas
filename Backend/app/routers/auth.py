@@ -1,228 +1,193 @@
-# backend/app/routers/auth.py
 from datetime import datetime, timedelta
 import os
-from typing import AsyncGenerator
+import time
+import random
+from typing import AsyncGenerator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, Response
 from fastapi.security import OAuth2PasswordRequestForm
-from jose import jwt, JWTError  # pip install python-jose[cryptography]
-from passlib.context import CryptContext  # pip install passlib[bcrypt]
+from jose import jwt, JWTError
+from passlib.context import CryptContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.schemas.user import UserCreate, UserResponse
+from backend.app.db import async_session
 from backend.app.repositories.user_repository import UserRepository
-from backend.app.models import User  # type: ignore
-from backend.app.schemas.base import ORMBase
+from backend.app.models.user import User
+from backend.app.utils.helpers import send_email
+from backend.app.services.cache import get_cached, set_cached
 
-# -------------------------
+# -----------------------------------------------------
 # CONFIG
-# -------------------------
+# -----------------------------------------------------
 SECRET_KEY = os.getenv("JWT_SECRET", "replace-this-secret-in-prod")
-ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_EXPIRE_MINUTES", "60"))
-REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_EXPIRE_DAYS", "30"))
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+REFRESH_TOKEN_EXPIRE_DAYS = 30
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = APIRouter(prefix="/auth", tags=["Auth"])
 
 
-# -------------------------
-# DB dependency (swap with your get_db)
-# -------------------------
-# NOTE: replace this with your actual get_db dependency that yields AsyncSession.
-# For example, from backend.app.db import get_async_db
+# -----------------------------------------------------
+# DB Session
+# -----------------------------------------------------
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """
-    Placeholder get_db. Replace with your actual implementation.
-    Example:
-        from backend.app.db import async_session
-        async with async_session() as session:
-            yield session
-    """
-    from backend.app.db import async_session  # update to your actual name
     async with async_session() as session:
         yield session
 
 
-# -------------------------
-# Utilities
-# -------------------------
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
-
-
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
-
-
-def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
+# -----------------------------------------------------
+# JWT UTILS
+# -----------------------------------------------------
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
     now = datetime.utcnow()
-    if expires_delta:
-        expire = now + expires_delta
-    else:
-        expire = now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = now + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire, "iat": now})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def create_refresh_token(data: dict, expires_delta: timedelta | None = None) -> str:
+def create_refresh_token(data: dict):
     to_encode = data.copy()
     now = datetime.utcnow()
-    if expires_delta:
-        expire = now + expires_delta
-    else:
-        expire = now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    expire = now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     to_encode.update({"exp": expire, "iat": now, "type": "refresh"})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-async def get_current_user(token: str = Depends(lambda: None), db: AsyncSession | None = None):
-    """
-    Example helper for dependency injection when needed by other routers.
-    In real usage you will use OAuth2PasswordBearer or cookie extraction.
-    """
-    raise NotImplementedError("Use OAuth2PasswordBearer or cookie extraction in your routes.")
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
 
 
-# -------------------------
-# Small helpers (email verification + send)
-# -------------------------
-async def send_verification_email(email: str, token: str):
-    """
-    TODO: replace with your actual email sending logic (async).
-    This function should send a verification link to: /auth/verify-email?token=...
-    """
-    # Example: await email_service.send_verification(email, token)
-    pass
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
 
 
-def decode_token(token: str) -> dict:
+# -----------------------------------------------------
+# BUSINESS EMAIL CHECK
+# -----------------------------------------------------
+def is_business_email(email: str) -> bool:
+    free_domains = {
+        "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+        "aol.com", "icloud.com", "protonmail.com", "yandex.com"
+    }
+    domain = email.split("@")[-1].lower()
+    return domain not in free_domains
+
+
+# -----------------------------------------------------
+# OTP HELPERS
+# -----------------------------------------------------
+OTP_TTL = 300                # 5 mins
+OTP_RESEND_COOLDOWN = 60     # 1 min
+OTP_LENGTH = 6
+
+def otp_key(email: str): return f"otp:{email}"
+def otp_cd_key(email: str): return f"otp_cd:{email}"
+
+def generate_otp(): return "".join(random.choices("0123456789", k=OTP_LENGTH))
+
+
+# -----------------------------------------------------
+# SEND OTP
+# -----------------------------------------------------
+@router.post("/send-otp")
+async def send_otp(data: dict):
+    email = data.get("email", "").lower().strip()
+
+    if not is_business_email(email):
+        raise HTTPException(400, "Use a business/company email.")
+
+    # Cooldown check
+    if get_cached(otp_cd_key(email)):
+        raise HTTPException(429, f"OTP recently sent. Try again in {OTP_RESEND_COOLDOWN}s")
+
+    # Generate + Save OTP
+    otp = generate_otp()
+    set_cached(otp_key(email), {"otp": otp, "ts": time.time()}, ttl=OTP_TTL)
+    set_cached(otp_cd_key(email), {"cd": True}, ttl=OTP_RESEND_COOLDOWN)
+
+    # Send email
+    subject = "Your Verification Code"
+    body = f"Your verification code is {otp}. It is valid for 5 minutes."
+
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except JWTError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
+        await send_email(to=email, subject=subject, body=body)
+    except Exception:
+        raise HTTPException(500, "Failed to send OTP")
+
+    return {"message": "OTP sent successfully", "email": email}
 
 
-# -------------------------
-# ROUTES
-# -------------------------
+# -----------------------------------------------------
+# VERIFY OTP
+# -----------------------------------------------------
+@router.post("/verify-otp")
+async def verify_otp(data: dict, db: AsyncSession = Depends(get_db)):
+    email = data.get("email", "").lower()
+    otp = data.get("otp", "")
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def register(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
-    """
-    Create a new user (register).
-    - Hashes password
-    - Creates user record
-    - Optionally sends verification email
-    """
-    user_repo = UserRepository(db)
-    existing = await user_repo.get_by_email(user_in.email)
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
+    saved = get_cached(otp_key(email))
+    if not saved or saved.get("otp") != otp:
+        raise HTTPException(400, "Invalid or expired OTP")
 
-    hashed = get_password_hash(user_in.password)
-    user_obj = await user_repo.create({"email": user_in.email, "hashed_password": hashed})
+    # Create or get user
+    repo = UserRepository(db)
+    user = await repo.get_by_email(email)
+    created = False
 
-    # Create an email verification token (signed JWT)
-    verify_token = create_access_token({"sub": str(user_obj.id), "email": user_obj.email}, expires_delta=timedelta(hours=24))
-    # enqueue or send verification email (async)
-    await send_verification_email(user_obj.email, verify_token)
-
-    return UserResponse.from_orm(user_obj)
-
-
-@router.post("/login")
-async def login(response: Response, form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
-    """
-    Login using email + password (OAuth2PasswordRequestForm compatible).
-    Returns access_token and refresh_token (in body).
-    You may also set cookies (HttpOnly) if desired.
-    """
-    user_repo = UserRepository(db)
-    user = await user_repo.get_by_email(form_data.username)
     if not user:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect email or password")
+        user = await repo.create({"email": email})
+        created = True
 
-    if not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect email or password")
-
-    # Check active
-    if not getattr(user, "is_active", True):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not active")
-
-    access_token = create_access_token({"sub": str(user.id), "email": user.email})
-    refresh_token = create_refresh_token({"sub": str(user.id), "email": user.email})
-
-    # Optionally set cookies (uncomment if you want cookie-based auth)
-    # response.set_cookie("access_token", access_token, httponly=True, secure=True, samesite="lax")
     return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "refresh_token": refresh_token,
-        "user": UserResponse.from_orm(user),
+        "message": "OTP verified",
+        "user_id": user.id,
+        "email": user.email,
+        "is_new": created
     }
 
 
-@router.post("/refresh")
-async def refresh_token(payload: dict, db: AsyncSession = Depends(get_db)):
-    """
-    Accepts JSON body with {"refresh_token": "..."} and returns new access token.
-    """
-    token = payload.get("refresh_token") if isinstance(payload, dict) else None
-    if not token:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing refresh_token")
+# -----------------------------------------------------
+# SET PASSWORD
+# -----------------------------------------------------
+@router.post("/set-password")
+async def set_password(data: dict, db: AsyncSession = Depends(get_db)):
+    user_id = data.get("user_id")
+    password = data.get("password")
 
-    try:
-        data = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+    if not user_id or not password:
+        raise HTTPException(400, "Missing user_id or password")
 
-    if data.get("type") != "refresh":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token is not refresh type")
-
-    user_id = int(data.get("sub"))
-    user_repo = UserRepository(db)
-    user = await user_repo.get(user_id)
+    repo = UserRepository(db)
+    user = await repo.get(user_id)
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(404, "User not found")
 
-    access_token = create_access_token({"sub": str(user.id), "email": user.email})
-    refresh_token = create_refresh_token({"sub": str(user.id), "email": user.email})
-    return {"access_token": access_token, "token_type": "bearer", "refresh_token": refresh_token}
+    hashed = hash_password(password)
+    await repo.update(user, {"hashed_password": hashed})
 
-
-@router.post("/logout")
-async def logout(response: Response):
-    """
-    Logout endpoint. If you use cookies, clear them here.
-    With token-based stateless JWT, instruct client to drop tokens.
-    """
-    # If you set cookies in login, clear them here:
-    # response.delete_cookie("access_token")
-    return {"ok": True}
+    return {"ok": True, "message": "Password set successfully"}
 
 
-@router.get("/verify-email")
-async def verify_email(token: str, db: AsyncSession = Depends(get_db)):
-    """
-    Simple email verification endpoint.
-    - decode token (contains user id)
-    - mark email_verified=True on user
-    """
-    try:
-        payload = decode_token(token)
-        uid = int(payload.get("sub"))
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired token")
+# -----------------------------------------------------
+# LOGIN
+# -----------------------------------------------------
+@router.post("/login")
+async def login(form: OAuth2PasswordRequestForm = Depends(),
+                db: AsyncSession = Depends(get_db)):
 
-    user_repo = UserRepository(db)
-    user = await user_repo.get(uid)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    repo = UserRepository(db)
+    user = await repo.get_by_email(form.username)
+    if not user or not user.hashed_password:
+        raise HTTPException(400, "Incorrect email or password")
 
-    await user_repo.update(user, {"email_verified": True})
-    return {"ok": True}
+    if not verify_password(form.password, user.hashed_password):
+        raise HTTPException(400, "Incorrect email or password")
+
+    return {
+        "access_token": create_access_token({"sub": str(user.id)}),
+        "refresh_token": create_refresh_token({"sub": str(user.id)}),
+        "token_type": "bearer"
+    }
