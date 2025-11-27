@@ -343,3 +343,5 @@ app = create_app()
 
 from backend.app.api.v1 import admin_webhook_dlq
 app.include_router(admin_webhook_dlq.router)
+from backend.app.routers import auth_password
+app.include_router(auth_password.router)
