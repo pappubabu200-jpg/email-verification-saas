@@ -175,3 +175,74 @@ export default function SideBar() {
     </aside>
   );
 }
+
+"use client";
+
+import { useRouter, usePathname } from "next/navigation";
+import {
+  FiHome,
+  FiMail,
+  FiLayers,
+  FiUsers,
+  FiKey,
+  FiBarChart2,
+  FiSettings,
+  FiDatabase,
+} from "react-icons/fi";
+
+export default function SideBar() {
+  const router = useRouter();
+  const pathname = usePathname();
+
+  const menu = [
+    { name: "Dashboard", path: "/dashboard", icon: <FiHome /> },
+    { name: "Single Verify", path: "/verification", icon: <FiMail /> },
+    { name: "Bulk Verify", path: "/bulk", icon: <FiLayers /> },
+    { name: "Decision Maker Finder", path: "/decision-maker", icon: <FiUsers /> },
+    { name: "API Keys", path: "/api-keys", icon: <FiKey /> },
+    { name: "Usage", path: "/usage", icon: <FiBarChart2 /> },
+    { name: "Billing", path: "/billing", icon: <FiDatabase /> },
+    { name: "Team", path: "/team", icon: <FiUsers /> },
+    { name: "Settings", path: "/settings", icon: <FiSettings /> },
+  ];
+
+  const isActive = (path: string) => pathname === path;
+
+  return (
+    <aside className="w-64 min-h-screen border-r bg-white flex flex-col py-6 px-4">
+      {/* Logo */}
+      <div
+        className="text-2xl font-bold text-blue-600 cursor-pointer px-3 mb-8"
+        onClick={() => router.push("/dashboard")}
+      >
+        ZeroVerify.ai
+      </div>
+
+      {/* Menu */}
+      <nav className="flex flex-col gap-1">
+        {menu.map((item) => (
+          <button
+            key={item.path}
+            onClick={() => router.push(item.path)}
+            className={`flex items-center gap-3 px-3 py-3 rounded-lg text-sm font-medium transition
+              ${
+                isActive(item.path)
+                  ? "bg-blue-600 text-white"
+                  : "text-gray-700 hover:bg-gray-100"
+              }
+            `}
+          >
+            <span className="text-lg">{item.icon}</span>
+            {item.name}
+          </button>
+        ))}
+      </nav>
+
+      {/* Footer */}
+      <div className="text-xs text-gray-400 mt-auto px-3">
+        © {new Date().getFullYear()} ZeroVerify.ai
+      </div>
+    </aside>
+  );
+}
+
