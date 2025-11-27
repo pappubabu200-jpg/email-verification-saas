@@ -112,3 +112,140 @@ export default function BulkUploadPage() {
     </div>
   );
 }
+
+"use client";
+
+import { useState, useEffect } from "react";
+import axios from "@/lib/axios";
+import CsvUploader from "@/components/Bulk/CsvUploader";
+import Button from "@/components/ui/Button";
+import Card from "@/components/ui/Card";
+import Loader from "@/components/ui/Loader";
+import ErrorBanner from "@/components/ui/ErrorBanner";
+import Link from "next/link";
+
+export default function BulkFinderPage() {
+  const [uploadId, setUploadId] = useState<string | null>(null);
+  const [jobName, setJobName] = useState<string>("");
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [jobs, setJobs] = useState<any[]>([]);
+  const [loadingJobs, setLoadingJobs] = useState(false);
+
+  // optional: load recent jobs
+  useEffect(() => {
+    fetchJobs();
+  }, []);
+
+  async function fetchJobs() {
+    setLoadingJobs(true);
+    try {
+      const res = await axios.get("/bulk/jobs");
+      setJobs(res.data || []);
+    } catch (err: any) {
+      // ignore; show nothing
+      console.error("Failed to load bulk jobs", err);
+    } finally {
+      setLoadingJobs(false);
+    }
+  }
+
+  const handleUploaded = (id: string) => {
+    setUploadId(id);
+    setError(null);
+  };
+
+  const handleCreateJob = async () => {
+    setError(null);
+    if (!uploadId) return setError("Please upload a CSV first.");
+    if (!jobName || jobName.trim().length < 3) {
+      return setError("Give the job a descriptive name (min 3 chars).");
+    }
+
+    setCreating(true);
+    try {
+      const payload = { upload_id: uploadId, name: jobName.trim() };
+      const res = await axios.post("/bulk/create", payload);
+      // push new job to list
+      setJobs((s) => [res.data, ...(s || [])]);
+      setUploadId(null);
+      setJobName("");
+      alert("Bulk job created — go to job details to monitor progress.");
+    } catch (err: any) {
+      setError(err.response?.data?.detail || "Failed to create bulk job");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen p-8 bg-gray-50">
+      <div className="max-w-4xl mx-auto space-y-6">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-semibold">Bulk Decision Maker Finder</h1>
+          <p className="text-sm text-gray-500">Upload domains or company list to find decision makers</p>
+        </div>
+
+        {error && <ErrorBanner message={error} />}
+
+        <Card className="p-6">
+          <h2 className="text-lg font-medium mb-3">1. Upload CSV</h2>
+          <p className="text-sm text-gray-500 mb-4">
+            CSV format: one column with domain or company per row or email list. Example: <code>example.com</code>
+          </p>
+
+          <CsvUploader onUploaded={handleUploaded} accept=".csv" />
+
+          {uploadId && (
+            <div className="mt-4">
+              <label className="block text-sm font-medium text-gray-700">Job Name</label>
+              <input
+                value={jobName}
+                onChange={(e) => setJobName(e.target.value)}
+                placeholder="e.g. Q4 Prospecting - Acme domains"
+                className="mt-2 p-2 border rounded w-full"
+              />
+              <div className="mt-3 flex gap-3">
+                <Button onClick={handleCreateJob} disabled={creating}>
+                  {creating ? <div className="flex items-center gap-2"><Loader /> Creating...</div> : "Create Bulk Job"}
+                </Button>
+                <Button onClick={() => { setUploadId(null); setJobName(""); }} variant="secondary">
+                  Cancel
+                </Button>
+              </div>
+              <p className="text-xs text-gray-400 mt-2">Upload id: <code>{uploadId}</code></p>
+            </div>
+          )}
+        </Card>
+
+        <Card className="p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-semibold">Recent Bulk Jobs</h3>
+            <div>
+              <Button onClick={fetchJobs} variant="ghost" disabled={loadingJobs}>
+                {loadingJobs ? "Refreshing..." : "Refresh"}
+              </Button>
+            </div>
+          </div>
+
+          {!jobs.length && <p className="text-sm text-gray-500">No bulk jobs yet.</p>}
+
+          <div className="space-y-3">
+            {jobs.map((j: any) => (
+              <div key={j.id} className="flex items-center justify-between border rounded p-3">
+                <div>
+                  <div className="font-medium">{j.name || `Job #${j.id}`}</div>
+                  <div className="text-sm text-gray-500">Status: <span className="font-medium">{j.status}</span></div>
+                  <div className="text-xs text-gray-400">Created: {new Date(j.created_at).toLocaleString()}</div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Link href={`/bulk/${j.id}`} className="text-blue-600 hover:underline">Open</Link>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
