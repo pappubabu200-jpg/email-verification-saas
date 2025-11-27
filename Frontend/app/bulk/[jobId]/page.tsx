@@ -5,180 +5,6 @@ import { useParams } from "next/navigation";
 import axios from "@/lib/axios";
 
 import Card from "@/components/ui/Card";
-import Button from "@/components/ui/Button";
-import Loader from "@/components/ui/Loader";
-import ErrorBanner from "@/components/ui/ErrorBanner";
-
-export default function BulkJobDetailPage() {
-  const { jobId } = useParams();
-
-  const [job, setJob] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [polling, setPolling] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  // ------------------------------
-  // Fetch job status
-  // ------------------------------
-  const fetchJob = async () => {
-    try {
-      const res = await axios.get(`/bulk_jobs/${jobId}`);
-      setJob(res.data);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || "Failed to load job");
-      setPolling(false);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Poll every 3 seconds until completed
-  useEffect(() => {
-    fetchJob();
-    if (polling) {
-      const timer = setInterval(fetchJob, 3000);
-      return () => clearInterval(timer);
-    }
-  }, [polling]);
-
-  if (loading) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <Loader />
-      </div>
-    );
-  }
-
-  if (!job) {
-    return <ErrorBanner message="Job not found." />;
-  }
-
-  const {
-    status,
-    total_emails,
-    processed,
-    failed,
-    started_at,
-    finished_at,
-    download_csv,
-    download_json
-  } = job;
-
-  const progress = total_emails
-    ? Math.round((processed / total_emails) * 100)
-    : 0;
-
-  // Stop polling when job finished
-  if (status === "completed" || status === "failed") {
-    if (polling) setPolling(false);
-  }
-
-  return (
-    <div className="p-8 max-w-4xl mx-auto space-y-8">
-      <h1 className="text-3xl font-semibold">Bulk Job #{jobId}</h1>
-      <p className="text-gray-600">Track progress of your uploaded CSV file.</p>
-
-      {/* Status Card */}
-      <Card>
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm text-gray-500">Status</p>
-            <span
-              className={`px-3 py-1 rounded text-sm font-medium ${
-                status === "completed"
-                  ? "bg-green-100 text-green-700"
-                  : status === "running"
-                  ? "bg-blue-100 text-blue-700"
-                  : status === "failed"
-                  ? "bg-red-100 text-red-700"
-                  : "bg-gray-100 text-gray-700"
-              }`}
-            >
-              {status.toUpperCase()}
-            </span>
-          </div>
-
-          <div>
-            <p className="text-sm text-gray-500">Progress</p>
-            <p className="text-xl font-bold">{progress}%</p>
-          </div>
-
-          <div>
-            <p className="text-sm text-gray-500">Processed</p>
-            <p className="text-xl font-bold">
-              {processed} / {total_emails}
-            </p>
-          </div>
-
-          <div>
-            <p className="text-sm text-gray-500">Failed</p>
-            <p className="text-xl font-bold text-red-600">{failed}</p>
-          </div>
-        </div>
-
-        {/* Progress bar */}
-        <div className="mt-6 w-full bg-gray-200 h-3 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-blue-600 transition-all"
-            style={{ width: `${progress}%` }}
-          ></div>
-        </div>
-
-        <div className="mt-4 text-sm text-gray-600">
-          Started: {started_at ? new Date(started_at).toLocaleString() : "--"}
-          <br />
-          Finished: {finished_at ? new Date(finished_at).toLocaleString() : "--"}
-        </div>
-      </Card>
-
-      {/* Downloads */}
-      {status === "completed" && (
-        <Card>
-          <h2 className="text-lg font-semibold mb-4">Download Results</h2>
-
-          <div className="flex gap-4">
-            {download_csv && (
-              <Button
-                variant="primary"
-                onClick={() => window.open(download_csv)}
-              >
-                Download CSV
-              </Button>
-            )}
-
-            {download_json && (
-              <Button
-                variant="secondary"
-                onClick={() => window.open(download_json)}
-              >
-                Download JSON
-              </Button>
-            )}
-          </div>
-        </Card>
-      )}
-
-      {/* Error Section */}
-      {status === "failed" && (
-        <Card>
-          <h2 className="text-lg font-semibold mb-2 text-red-600">Job Failed</h2>
-          <p className="text-gray-600">
-            Something went wrong while processing the job. Please retry or upload a
-            smaller file.
-          </p>
-        </Card>
-      )}
-    </div>
-  );
-      }
-
-"use client";
-
-import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
-import axios from "@/lib/axios";
-
-import Card from "@/components/ui/Card";
 import Loader from "@/components/ui/Loader";
 import Button from "@/components/ui/Button";
 import ErrorBanner from "@/components/ui/ErrorBanner";
@@ -187,19 +13,15 @@ export default function BulkJobDetailPage() {
   const { jobId } = useParams();
   const [job, setJob] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [polling, setPolling] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Fetch job details
+  // ---------------------------------------------------------
+  // Fetch initial job snapshot
+  // ---------------------------------------------------------
   const fetchJob = async () => {
     try {
       const res = await axios.get(`/bulk/${jobId}`);
       setJob(res.data);
-
-      // Stop polling if completed or failed
-      if (["completed", "failed", "error"].includes(res.data.status)) {
-        setPolling(false);
-      }
     } catch (err: any) {
       setError(err.response?.data?.detail || "Failed to load job details");
     } finally {
@@ -207,15 +29,70 @@ export default function BulkJobDetailPage() {
     }
   };
 
-  // Poll every 2.5 seconds
+  // ---------------------------------------------------------
+  // Initial Load
+  // ---------------------------------------------------------
   useEffect(() => {
     fetchJob();
-    if (!polling) return;
+  }, [jobId]);
 
-    const interval = setInterval(fetchJob, 2500);
-    return () => clearInterval(interval);
-  }, [jobId, polling]);
+  // ---------------------------------------------------------
+  // WebSocket LIVE UPDATES
+  // ---------------------------------------------------------
+  useEffect(() => {
+    if (!jobId) return;
 
+    const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL}/ws/bulk/${jobId}`;
+    console.log("🔌 Connecting to Bulk WS:", wsUrl);
+
+    const ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+      const update = JSON.parse(event.data);
+      console.log("📡 WS:", update);
+
+      // Live progress
+      if (update.event === "progress") {
+        setJob((prev: any) => ({
+          ...prev,
+          processed: update.processed,
+          total: update.total,
+          stats: update.stats,
+          status: "running",
+        }));
+      }
+
+      // Finished
+      if (update.event === "completed") {
+        setJob((prev: any) => ({
+          ...prev,
+          status: "completed",
+          processed: update.total,
+          total: update.total,
+          stats: update.stats,
+        }));
+        ws.close();
+      }
+
+      // Failed
+      if (update.event === "failed") {
+        setJob((prev: any) => ({
+          ...prev,
+          status: "failed",
+        }));
+        ws.close();
+      }
+    };
+
+    ws.onerror = () => console.error("❌ WebSocket error");
+    ws.onclose = () => console.log("🔌 Bulk WebSocket closed");
+
+    return () => ws.close();
+  }, [jobId]);
+
+  // ---------------------------------------------------------
+  // Render UI
+  // ---------------------------------------------------------
   if (loading)
     return (
       <div className="flex justify-center p-20">
@@ -230,7 +107,6 @@ export default function BulkJobDetailPage() {
   const progress =
     job.total && job.processed ? Math.round((job.processed / job.total) * 100) : 0;
 
-  // Stats
   const stats = job.stats || {
     valid: 0,
     risky: 0,
@@ -243,9 +119,9 @@ export default function BulkJobDetailPage() {
       {/* HEADER */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">{job.name}</h1>
+          <h1 className="text-2xl font-semibold">{job.name || "Bulk Job"}</h1>
           <p className="text-sm text-gray-500">
-            Job ID: <code>{job.id}</code>
+            Job ID: <code>{jobId}</code>
           </p>
         </div>
 
@@ -264,13 +140,15 @@ export default function BulkJobDetailPage() {
       {/* STATUS CARD */}
       <Card className="p-6 space-y-6">
         <div className="flex justify-between items-center">
-          <p className="text-lg font-semibold">Status: {job.status.toUpperCase()}</p>
+          <p className="text-lg font-semibold">
+            Status: {job.status?.toUpperCase()}
+          </p>
           <p className="text-sm text-gray-500">
-            {job.processed}/{job.total} completed
+            {job.processed}/{job.total} processed
           </p>
         </div>
 
-        {/* Progress bar */}
+        {/* Progress Bar */}
         <div className="w-full bg-gray-200 h-3 rounded">
           <div
             className="bg-blue-600 h-full rounded transition-all"
@@ -278,24 +156,24 @@ export default function BulkJobDetailPage() {
           />
         </div>
 
-        {/* Stats grid */}
+        {/* Stats */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-6">
-          <div className="p-3 rounded border bg-white">
+          <div className="p-3 border rounded bg-white">
             <p className="text-xs text-gray-600">Valid</p>
             <p className="font-bold text-green-600">{stats.valid}</p>
           </div>
 
-          <div className="p-3 rounded border bg-white">
+          <div className="p-3 border rounded bg-white">
             <p className="text-xs text-gray-600">Risky</p>
             <p className="font-bold text-yellow-600">{stats.risky}</p>
           </div>
 
-          <div className="p-3 rounded border bg-white">
+          <div className="p-3 border rounded bg-white">
             <p className="text-xs text-gray-600">Invalid</p>
             <p className="font-bold text-red-600">{stats.invalid}</p>
           </div>
 
-          <div className="p-3 rounded border bg-white">
+          <div className="p-3 border rounded bg-white">
             <p className="text-xs text-gray-600">Unknown</p>
             <p className="font-bold text-blue-600">{stats.unknown}</p>
           </div>
@@ -305,7 +183,7 @@ export default function BulkJobDetailPage() {
       {/* RESULTS TABLE */}
       {job.results && job.results.length > 0 && (
         <Card className="p-0 overflow-hidden">
-          <table className="w-full border-collapse text-sm">
+          <table className="w-full text-sm border-collapse">
             <thead className="bg-gray-100 border-b">
               <tr>
                 <th className="p-3 text-left">Email</th>
@@ -330,4 +208,3 @@ export default function BulkJobDetailPage() {
     </div>
   );
 }
-
