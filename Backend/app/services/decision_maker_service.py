@@ -205,3 +205,197 @@ def search_decision_makers(
     set_cached(query_key, {"results": final_out}, ttl=60 * 60 * 24)
 
     return final_out
+
+    # backend/app/services/decision_maker_service.py
+import logging
+import asyncio
+import time
+from typing import Optional, Dict, Any, List
+from backend.app.services.apollo_client import apollo_search_person, apollo_enrich_person_by_email
+from backend.app.services.pdl_client import pdl_enrich_email
+from backend.app.services.cache import get_cached, set_cached, cache_key
+from backend.app.services.processing_lock import acquire_processing_key, release_processing_key, wait_for_processing_result
+from backend.app.services.redis_rate_limiter import RateLimiter
+from backend.app.services.metrics import DM_METRICS  # optional metrics module (see note)
+from backend.app.services.credits_service import deduct_credits, check_credits  # adapt to your service
+from backend.app.config import settings
+
+logger = logging.getLogger(__name__)
+RATE_LIMITER = RateLimiter(redis_url=getattr(settings, "REDIS_URL", None))
+
+# TTL for cached decision maker results
+DM_CACHE_TTL = int(getattr(settings, "DM_CACHE_TTL", 3600))
+
+
+def _normalize_apollo_person(raw: Dict[str, Any]) -> Dict[str, Any]:
+    # map Apollo's payload to our UI shape
+    # This is best-effort; adapt to actual Apollo response structure
+    return {
+        "id": raw.get("id") or raw.get("email"),
+        "name": raw.get("name") or raw.get("full_name"),
+        "email": raw.get("email"),
+        "title": raw.get("title"),
+        "company": raw.get("company_name") or (raw.get("current_employer") and raw["current_employer"].get("name")),
+        "linkedin": raw.get("linkedin_url") or raw.get("linkedin"),
+        "confidence": raw.get("confidence_score") or raw.get("score"),
+        "raw_apollo": raw,
+    }
+
+
+def _normalize_pdl_person(raw: Dict[str, Any]) -> Dict[str, Any]:
+    # map PDL response fields to our internal shape (best-effort)
+    return {
+        "id": raw.get("uuid") or raw.get("request_id") or raw.get("email"),
+        "name": raw.get("full_name") or raw.get("name"),
+        "email": raw.get("email"),
+        "phone": raw.get("phone"),
+        "linkedin": raw.get("linkedin"),
+        "company": (raw.get("employment") and raw["employment"].get("organization")),
+        "work_history": raw.get("employment_history") or [],
+        "raw_pdl": raw,
+    }
+
+
+def _merge_records(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Simple merge logic: primary has precedence; fill missing keys from secondary.
+    Also combine arrays (work_history).
+    """
+    out = dict(primary)
+    for k, v in (secondary or {}).items():
+        if k not in out or out.get(k) in (None, "", []):
+            out[k] = v
+        else:
+            # if both lists, merge unique
+            if isinstance(out.get(k), list) and isinstance(v, list):
+                seen = {str(x) for x in out[k]}
+                out[k] = out[k] + [x for x in v if str(x) not in seen]
+    return out
+
+
+async def search_decision_makers(query: str, user_id: Optional[int] = None, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    High-level search:
+    1) Rate limit using sliding-window per user or global
+    2) Try cache for query (simple)
+    3) Call Apollo search (primary)
+    4) For each match, optionally enrich via PDL (background or on demand)
+    5) Return normalized list and cache
+    """
+    key = f"dm:search:{query.lower()}"
+    # rate limit per user_id if given
+    rl_key = f"dm:rl:user:{user_id}" if user_id else "dm:rl:global"
+    allowed, retry = RATE_LIMITER.acquire(rl_key, limit=30, window_seconds=60)  # 30 searches / minute default
+    if not allowed:
+        raise Exception(f"Rate limit exceeded, retry after {retry} sec")
+
+    # cache lookup
+    try:
+        cached = await asyncio.to_thread(get_cached, key)
+    except Exception:
+        cached = None
+
+    if cached:
+        return cached.get("results", [])
+
+    # Try to reserve credits (optional)
+    if user_id:
+        try:
+            has = await asyncio.to_thread(check_credits, user_id, 1)  # check at least 1 credit
+            if not has:
+                raise Exception("Insufficient credits")
+        except Exception as e:
+            logger.debug("Credit check error/insufficient: %s", e)
+
+    raw = await apollo_search_person(query, limit=limit)
+    results: List[Dict[str, Any]] = []
+    if raw and isinstance(raw, dict):
+        # Apollo may return results in raw['people'] or raw['data']
+        entries = raw.get("people") or raw.get("data") or raw.get("results") or []
+        for e in entries:
+            normalized = _normalize_apollo_person(e)
+            # do not do heavy PDL enrich here; frontend can request per-result enrich
+            results.append(normalized)
+
+    # cache results (best-effort)
+    try:
+        await asyncio.to_thread(set_cached, key, {"results": results}, ttl=DM_CACHE_TTL)
+    except Exception:
+        pass
+
+    return results
+
+
+async def get_decision_maker_detail(uid_or_email: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """
+    Return detailed enriched profile for single DM (by id or email)
+    Steps:
+      - Check cache
+      - Acquire a processing lock to dedupe
+      - If lock lost, wait for producer to finish and return cache
+      - Call Apollo enrich by email (fast)
+      - Call PDL enrich (heavy)
+      - Merge, cache, optionally deduct credits
+    """
+    key = f"dm:detail:{uid_or_email.lower()}"
+    # 1) cache
+    cached = await asyncio.to_thread(get_cached, key)
+    if cached:
+        return cached
+
+    got_lock = await acquire_processing_key(key, ttl=60)
+    if not got_lock:
+        # wait for other's result
+        maybe = await wait_for_processing_result(key, poll_interval=0.5, timeout=20)
+        if maybe:
+            return maybe
+        # otherwise continue
+
+    try:
+        # 2) Apollo quick enrich (by email if looks like email)
+        apollo = None
+        if "@" in uid_or_email:
+            apollo = await apollo_enrich_person_by_email(uid_or_email)
+        else:
+            # fallback: search by name/id
+            apollo_search = await apollo_search_person(uid_or_email, limit=1)
+            candidates = (apollo_search.get("people") or apollo_search.get("data") or []) if apollo_search else []
+            if candidates:
+                apollo = candidates[0]
+
+        apn = _normalize_apollo_person(apollo or {}) if apollo else {}
+
+        # 3) PDL enrich by email if present
+        pdl = None
+        email = apn.get("email") or (uid_or_email if "@" in uid_or_email else None)
+        if email:
+            pdl = await pdl_enrich_email(email)
+        pdln = _normalize_pdl_person(pdl or {}) if pdl else {}
+
+        merged = _merge_records(apn, pdln)
+
+        # attach metadata
+        merged["_sources"] = {"apollo": bool(apollo), "pdl": bool(pdl)}
+        merged["_fetched_at"] = int(time.time())
+
+        # 4) Deduct credits (best-effort)
+        if user_id:
+            try:
+                # attempt to deduct 1 credit for an enrichment
+                await asyncio.to_thread(deduct_credits, user_id, 1, reason="dm_enrich")
+            except Exception as e:
+                logger.debug("Failed to deduct credits (ignored): %s", e)
+
+        # 5) Cache result
+        try:
+            await asyncio.to_thread(set_cached, key, merged, ttl=DM_CACHE_TTL)
+        except Exception:
+            logger.debug("Caching dm detail failed")
+
+        return merged
+
+    finally:
+        try:
+            await release_processing_key(key)
+        except Exception:
+            pass
