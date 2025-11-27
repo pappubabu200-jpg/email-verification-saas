@@ -4,13 +4,14 @@ import asyncio
 from typing import Set, Dict
 from fastapi import WebSocket
 
+from backend.app.services.ws.api_logs_pubsub import publish_api_log
+
 class APILogsWSManager:
     def __init__(self):
         self.active: Set[WebSocket] = set()
         self.lock = asyncio.Lock()
 
     async def connect(self, ws: WebSocket):
-        # accept then add
         await ws.accept()
         async with self.lock:
             self.active.add(ws)
@@ -22,12 +23,12 @@ class APILogsWSManager:
 
     async def broadcast(self, payload: Dict):
         """
-        payload: arbitrary dict describing the API log event
+        This is called ONLY by Redis subscriber.
         """
-        text = json.dumps(payload, default=str)
+        text = json.dumps(payload)
         async with self.lock:
             dead = []
-            for ws in set(self.active):
+            for ws in list(self.active):
                 try:
                     await ws.send_text(text)
                 except Exception:
@@ -35,7 +36,5 @@ class APILogsWSManager:
             for ws in dead:
                 self.active.discard(ws)
 
-# singleton instance
+
 api_logs_ws = APILogsWSManager()
-
-
