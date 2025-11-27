@@ -23,3 +23,18 @@ export default function SuccessBanner({ message }: Props) {
     </div>
   );
 }
+"use client";
+
+interface Props {
+  message: string;
+}
+
+export default function SuccessBanner({ message }: Props) {
+  if (!message) return null;
+
+  return (
+    <div className="w-full p-3 mb-4 rounded-md bg-green-100 border border-green-300 text-green-700 text-sm">
+      {message}
+    </div>
+  );
+}
