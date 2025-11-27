@@ -103,4 +103,67 @@ async def dm_refresh(uid: str, user=Depends(get_current_user_optional)):
 
     return {"queued": True, "uid": uid}
 
-    
+    from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.app.db import get_async_db
+from backend.app.services.decision_maker_service import (
+    search_decision_makers,
+    get_company_suggestions,
+    enrich_single_dm,
+    get_dm_detail
+)
+from backend.app.schemas.decision_maker import DecisionMakerResponse
+
+router = APIRouter(prefix="/decision-maker", tags=["Decision Maker"])
+
+
+# ----------------------------------------------------
+# SEARCH (name, role, company)
+# ----------------------------------------------------
+@router.get("/search")
+async def dm_search(
+    q: str = Query("", description="keyword"),
+    company: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=50),
+    db: AsyncSession = Depends(get_async_db)
+):
+    result = await search_decision_makers(db, q=q, company=company, page=page, per_page=per_page)
+    return result
+
+
+# ----------------------------------------------------
+# COMPANY AUTOCOMPLETE
+# ----------------------------------------------------
+@router.get("/company-suggest")
+async def dm_company_suggest(
+    q: str = Query(...),
+    db: AsyncSession = Depends(get_async_db)
+):
+    suggestions = await get_company_suggestions(db, q)
+    return suggestions
+
+
+# ----------------------------------------------------
+# SINGLE DM DETAIL
+# ----------------------------------------------------
+@router.get("/{dm_id}", response_model=DecisionMakerResponse)
+async def dm_detail(dm_id: str, db: AsyncSession = Depends(get_async_db)):
+    dm = await get_dm_detail(db, dm_id)
+    if not dm:
+        raise HTTPException(404, "Decision maker not found")
+    return dm
+
+
+# ----------------------------------------------------
+# ENRICH A SINGLE PERSON (PDL + APOLLO)
+# ----------------------------------------------------
+@router.post("/enrich")
+async def dm_enrich(payload: dict, db: AsyncSession = Depends(get_async_db)):
+    dm_id = payload.get("id")
+    if not dm_id:
+        raise HTTPException(400, "Missing id")
+
+    task_id = await enrich_single_dm(db, dm_id)
+    return {"ok": True, "task_id": task_id}
