@@ -53,3 +53,87 @@ export default function DMSearchForm({
     </div>
   );
 }
+
+"use client";
+
+import { useState } from "react";
+import Input from "@/components/ui/Input";
+import Button from "@/components/ui/Button";
+import axios from "@/lib/axios";
+
+export default function DMSearchForm({
+  initialQuery = "",
+  onSearch,
+  onQuickCompany,
+}: {
+  initialQuery?: string;
+  onSearch: (q: string, company?: string) => void;
+  onQuickCompany?: (company: string) => void;
+}) {
+  const [q, setQ] = useState(initialQuery);
+  const [company, setCompany] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+
+  const handleSearch = () => {
+    onSearch(q.trim(), company.trim() || undefined);
+  };
+
+  const fetchCompanySuggestions = async (term: string) => {
+    if (!term) return setSuggestions([]);
+    try {
+      const res = await axios.get("/decision-maker/company-suggest", { params: { q: term } });
+      setSuggestions(res.data || []);
+    } catch {
+      setSuggestions([]);
+    }
+  };
+
+  return (
+    <div className="bg-white p-4 rounded shadow-sm mb-4">
+      <div className="flex gap-3">
+        <Input
+          label="Name or Role (e.g. VP Marketing)"
+          value={q}
+          onChange={(e: any) => setQ(e.target.value)}
+          placeholder="e.g. Head of Growth"
+        />
+        <div className="w-64">
+          <Input
+            label="Company (optional)"
+            value={company}
+            onChange={(e: any) => {
+              setCompany(e.target.value);
+              fetchCompanySuggestions(e.target.value);
+            }}
+            placeholder="Company name"
+          />
+          {suggestions.length > 0 && (
+            <div className="mt-1 bg-white border rounded max-h-40 overflow-auto">
+              {suggestions.map((s, i) => (
+                <div
+                  key={i}
+                  className="p-2 hover:bg-gray-50 cursor-pointer text-sm"
+                  onClick={() => {
+                    setCompany(s);
+                    setSuggestions([]);
+                    onQuickCompany && onQuickCompany(s);
+                  }}
+                >
+                  {s}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-end">
+          <Button onClick={handleSearch} variant="primary">
+            Search
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
