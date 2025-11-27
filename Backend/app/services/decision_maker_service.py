@@ -399,3 +399,8 @@ async def get_decision_maker_detail(uid_or_email: str, user_id: Optional[int] = 
             await release_processing_key(key)
         except Exception:
             pass
+async def enqueue_enrichment(uid: str, user_id: Optional[int] = None):
+    from backend.app.workers.decision_maker_tasks import dm_enrich_async
+    dm_enrich_async.delay(uid, user_id)
+
+
