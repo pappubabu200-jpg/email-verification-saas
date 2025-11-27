@@ -156,3 +156,101 @@ async def apollo_enrich_person_by_email(email: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.debug("Apollo enrich failed for %s: %s", email, e)
         return None
+# backend/app/services/apollo_client.py
+
+"""
+Apollo.io Client
+Used for:
+  ✓ People search
+  ✓ Email enrichment
+  ✓ Person detail
+"""
+
+import os
+import logging
+import requests
+
+logger = logging.getLogger(__name__)
+
+APOLLO_API_KEY = os.getenv("APOLLO_API_KEY", "")
+APOLLO_TIMEOUT = 10
+
+class ApolloClient:
+    BASE = "https://api.apollo.io/v1"
+
+    def __init__(self, api_key: str | None = None):
+        self.api_key = api_key or APOLLO_API_KEY
+        if not self.api_key:
+            raise RuntimeError("APOLLO_API_KEY missing")
+
+    # ------------------------------------------------
+    # SEARCH PERSON
+    # ------------------------------------------------
+    def search_people(self, query: str, limit: int = 25) -> list:
+        """
+        Search by domain or company name.
+        """
+        url = f"{self.BASE}/mixed_people/search"
+        payload = {
+            "api_key": self.api_key,
+            "page": 1,
+            "person_titles": [],
+            "q_keywords": query,
+            "per_page": limit,
+        }
+
+        try:
+            r = requests.post(url, json=payload, timeout=APOLLO_TIMEOUT)
+            if r.status_code == 200:
+                return r.json().get("people", [])
+            else:
+                logger.debug(f"Apollo search err: {r.text}")
+        except Exception as e:
+            logger.debug(f"Apollo search error: {e}")
+
+        return []
+
+    # ------------------------------------------------
+    # ENRICH BY EMAIL
+    # ------------------------------------------------
+    def enrich_person_by_email(self, email: str) -> dict | None:
+        url = f"{self.BASE}/people/match"
+
+        payload = {
+            "api_key": self.api_key,
+            "email": email,
+        }
+
+        try:
+            r = requests.post(url, json=payload, timeout=APOLLO_TIMEOUT)
+            if r.status_code == 200:
+                people = r.json().get("people", [])
+                return people[0] if people else None
+        except Exception as e:
+            logger.debug(f"Apollo enrich error: {e}")
+
+        return None
+
+    # ------------------------------------------------
+    # ENRICH BY NAME + COMPANY
+    # ------------------------------------------------
+    def enrich_person_by_name_company(self, name: str, company: str) -> dict | None:
+        payload = {
+            "api_key": self.api_key,
+            "name": name,
+            "current_employer": company,
+        }
+        url = f"{self.BASE}/people/match"
+
+        try:
+            r = requests.post(url, json=payload, timeout=APOLLO_TIMEOUT)
+            if r.status_code == 200:
+                people = r.json().get("people", [])
+                return people[0] if people else None
+        except Exception as e:
+            logger.debug(f"Apollo name/company error: {e}")
+
+        return None
+
+
+
