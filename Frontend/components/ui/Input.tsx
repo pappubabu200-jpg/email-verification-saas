@@ -25,3 +25,64 @@ export default function Input({
     </div>
   );
 }
+
+"use client";
+
+import React from "react";
+import clsx from "clsx";
+
+/**
+ * Reusable Input component with:
+ *  - label
+ *  - error message
+ *  - variants: default, small, large
+ *  - full-width by default
+ */
+
+interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
+  label?: string;
+  error?: string | null;
+  size?: "sm" | "md" | "lg";
+}
+
+export default function Input({
+  label,
+  error,
+  size = "md",
+  className,
+  ...rest
+}: InputProps) {
+  const sizeStyles = {
+    sm: "px-3 py-1 text-sm",
+    md: "px-4 py-2 text-base",
+    lg: "px-5 py-3 text-lg",
+  };
+
+  return (
+    <div className="w-full">
+      {label && (
+        <label className="block mb-1 text-sm font-medium text-gray-700">
+          {label}
+        </label>
+      )}
+
+      <input
+        {...rest}
+        className={clsx(
+          "w-full border rounded-xl bg-white focus:outline-none focus:ring-2 transition",
+          error
+            ? "border-red-500 focus:ring-red-400"
+            : "border-gray-300 focus:ring-blue-500",
+          sizeStyles[size],
+          className
+        )}
+      />
+
+      {error && (
+        <p className="text-sm text-red-600 mt-1">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+      }
