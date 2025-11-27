@@ -53,3 +53,60 @@ export default function AdminLogsPage() {
     </div>
   );
 }
+
+"use client";
+
+import { useMemo } from "react";
+import { useAdminAPILogWS } from "@/hooks/useAdminAPILogWS";
+import Card from "@/components/ui/Card";
+
+export default function AdminApiLogsPage() {
+  const { messages } = useAdminAPILogWS();
+
+  const rows = useMemo(() => messages.slice(0, 200), [messages]);
+
+  return (
+    <div className="max-w-7xl mx-auto p-8">
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-semibold">Live API Logs</h1>
+        <p className="text-sm text-gray-500">Incoming requests (admin only)</p>
+      </div>
+
+      <Card>
+        <div className="overflow-auto">
+          <table className="min-w-full text-sm">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="p-2 text-left">Time</th>
+                <th className="p-2 text-left">Method</th>
+                <th className="p-2 text-left">Path</th>
+                <th className="p-2 text-left">Status</th>
+                <th className="p-2 text-left">Duration (ms)</th>
+                <th className="p-2 text-left">Client</th>
+                <th className="p-2 text-left">User / Key</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((m: any, i: number) => (
+                <tr key={i} className="border-b hover:bg-gray-50">
+                  <td className="p-2">{m.ts ? new Date(m.ts * 1000).toLocaleTimeString() : "-"}</td>
+                  <td className="p-2 font-medium">{m.method}</td>
+                  <td className="p-2">{m.path}{m.query ? `?${m.query}` : ""}</td>
+                  <td className="p-2">{m.status}</td>
+                  <td className="p-2">{m.duration_ms}</td>
+                  <td className="p-2">{m.client_ip || "-"}</td>
+                  <td className="p-2 text-xs text-gray-600">{m.user_id || m.api_key_hint || "-"}</td>
+                </tr>
+              ))}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="p-6 text-center text-gray-500">No logs yet</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
