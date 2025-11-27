@@ -158,3 +158,51 @@ export default function NavBar() {
     </header>
   );
           }
+
+
+"use client";
+
+import { useState } from "react";
+import { useAuth } from "@/hooks/useAuth";
+import { useRouter } from "next/navigation";
+import { Menu } from "lucide-react";
+
+export default function NavBar() {
+  const { user, logout } = useAuth();
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+
+  const handleLogout = async () => {
+    await logout();
+    router.push("/auth/send-otp");
+  };
+
+  return (
+    <header className="h-14 bg-white border-b flex items-center justify-between px-4 lg:px-6 shadow-sm">
+      {/* Mobile Sidebar Toggle */}
+      <button
+        className="lg:hidden p-2 text-gray-600 hover:bg-gray-100 rounded-md"
+        onClick={() => setOpen(true)}
+      >
+        <Menu size={22} />
+      </button>
+
+      {/* Title Placeholder - can be dynamic later */}
+      <div className="font-medium text-gray-800 text-lg">Dashboard</div>
+
+      {/* User Menu */}
+      <div className="flex items-center gap-3">
+        <span className="text-sm text-gray-600 hidden sm:block">
+          {user?.email}
+        </span>
+
+        <button
+          onClick={handleLogout}
+          className="px-3 py-1.5 bg-gray-800 text-white rounded-md text-sm hover:bg-black"
+        >
+          Logout
+        </button>
+      </div>
+    </header>
+  );
+}
