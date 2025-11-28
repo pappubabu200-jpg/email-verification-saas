@@ -476,3 +476,6 @@ async def admin_apilogs_socket(ws: WebSocket):
             await ws.receive_text()  # ignore, keep alive
     except WebSocketDisconnect:
         await api_logs_ws.disconnect(ws)
+from backend.app.routers.dm_ws import router as dm_ws_router
+app.include_router(dm_ws_router)
+
