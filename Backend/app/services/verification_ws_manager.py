@@ -41,3 +41,34 @@ class VerificationWSManager:
         # cleanup dead sockets
         for ws in dead:
             self.active[user_id].remove(ws)
+
+# backend/app/services/verification_ws_manager.py
+"""
+Light wrapper used by backend workers to push notifications to user channels.
+Workers can call:
+    import asyncio
+    asyncio.run(verification_ws.push(user_id, payload))
+or call ws_broker.publish directly.
+"""
+
+from typing import Any, Optional
+from backend.app.services.ws_broker import ws_broker
+
+class VerificationWS:
+    def __init__(self):
+        pass
+
+    async def push(self, user_id: Optional[int], payload: Any) -> None:
+        """
+        Push a payload to a user's verification channel.
+        Channel convention: user:{user_id}:verification
+        """
+        if user_id is None:
+            return
+        channel = f"user:{int(user_id)}:verification"
+        await ws_broker.publish(channel, payload)
+
+
+verification_ws = VerificationWS()
+
+
