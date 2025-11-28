@@ -482,4 +482,7 @@ from backend.app.routers.dm_analytics import router as dm_analytics_router
 
 app.include_router(dm_analytics_router)
 
+from backend.app.routers.ws_stream import router as ws_stream_router
+app.include_router(ws_stream_router)
+
 
