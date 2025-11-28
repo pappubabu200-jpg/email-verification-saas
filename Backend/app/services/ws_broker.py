@@ -109,4 +109,62 @@ class RedisPubSubBroker:
 
 # Create shared instance
 ws_broker = RedisPubSubBroker(REDIS_URL)
+# backend/app/services/ws_broker.py
+"""
+Aioredis-backed pubsub broker helper.
+
+Usage:
+  from backend.app.services.ws_broker import ws_broker
+  await ws_broker.publish("channel", {"event":"x"})
+  # In FastAPI WS handler subscribe manually to Redis using ws_broker.get_redis()
+"""
+
+import os
+import json
+import logging
+from typing import Any, Optional
+
+import redis.asyncio as aioredis  # requires redis>=4.x
+
+logger = logging.getLogger(__name__)
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+
+class _WSBroker:
+    def __init__(self):
+        self._redis: Optional[aioredis.Redis] = None
+
+    def _ensure(self):
+        if self._redis is None:
+            self._redis = aioredis.from_url(REDIS_URL, decode_responses=True)
+
+    def get_redis(self) -> aioredis.Redis:
+        """Return aioredis client (async)."""
+        self._ensure()
+        assert self._redis is not None
+        return self._redis
+
+    async def publish(self, channel: str, payload: Any) -> None:
+        """Publish JSON payload to channel."""
+        try:
+            self._ensure()
+            assert self._redis is not None
+            msg = json.dumps(payload, default=str)
+            await self._redis.publish(channel, msg)
+        except Exception as e:
+            logger.exception("ws_broker.publish failed: %s", e)
+
+    async def close(self) -> None:
+        if self._redis:
+            try:
+                await self._redis.close()
+            except Exception:
+                pass
+            self._redis = None
+
+
+# singleton
+ws_broker = _WSBroker()
+
 
