@@ -1,4 +1,4 @@
 minio
-
+redis
 alembic
 stripe
