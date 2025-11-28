@@ -485,4 +485,6 @@ app.include_router(dm_analytics_router)
 from backend.app.routers.ws_stream import router as ws_stream_router
 app.include_router(ws_stream_router)
 
+from backend.app.routers import verification_ws
+app.include_router(verification_ws.router)
 
