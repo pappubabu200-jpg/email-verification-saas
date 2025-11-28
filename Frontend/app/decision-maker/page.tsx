@@ -247,3 +247,91 @@ export default function DecisionMakerPage() {
     </div>
   );
 }
+"use client";
+
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import axios from "@/lib/axios";
+import Button from "@/components/ui/Button";
+import Input from "@/components/ui/Input";
+import ErrorBanner from "@/components/ui/ErrorBanner";
+import Loader from "@/components/ui/Loader";
+
+export default function DecisionMakerStartPage() {
+  const router = useRouter();
+
+  const [domain, setDomain] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const isValidDomain = (d: string) =>
+    /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(d);
+
+  const startDiscovery = async () => {
+    setError(null);
+
+    const cleaned = domain.trim().toLowerCase();
+    if (!isValidDomain(cleaned)) {
+      setError("Enter a valid company domain, e.g., stripe.com");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await axios.post("/decision-maker/discover", {
+        domain: cleaned,
+      });
+
+      const jobId = res.data?.job_id;
+      if (!jobId) throw new Error("Invalid job response");
+
+      // redirect to live discovery page
+      router.push(`/decision-maker/live/${jobId}`);
+    } catch (err: any) {
+      setError(
+        err.response?.data?.detail ||
+          "Failed to start discovery — try again."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 p-6">
+      <div className="max-w-lg w-full space-y-6 p-8 bg-white rounded shadow">
+        <h1 className="text-3xl font-semibold">Decision Maker Finder</h1>
+        <p className="text-gray-600 text-sm">
+          Enter a company domain to discover verified executives (CEO, CTO, CMO,
+          etc.) using Apollo + PDL + AI guessing + verification engine.
+        </p>
+
+        {error && <ErrorBanner message={error} />}
+
+        <Input
+          label="Company Domain"
+          placeholder="example.com"
+          value={domain}
+          onChange={(e: any) => setDomain(e.target.value)}
+        />
+
+        <Button
+          variant="primary"
+          className="w-full"
+          disabled={loading}
+          onClick={startDiscovery}
+        >
+          {loading ? (
+            <div className="flex items-center gap-2">
+              <Loader /> Starting…
+            </div>
+          ) : (
+            "Start Discovery"
+          )}
+        </Button>
+      </div>
+    </div>
+  );
+        }
+
+
