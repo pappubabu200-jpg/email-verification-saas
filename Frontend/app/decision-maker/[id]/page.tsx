@@ -8,23 +8,29 @@ import Card from "@/components/ui/Card";
 import Button from "@/components/ui/Button";
 import Loader from "@/components/ui/Loader";
 import ErrorBanner from "@/components/ui/ErrorBanner";
-import { usePolling } from "@/hooks/usePolling";
+
+import DMEnrichButton from "@/components/DecisionMaker/DMEnrichButton";
+import { useDMEnrichmentWS } from "@/hooks/useDMEnrichmentWS";
 
 export default function DecisionMakerDetailPage() {
   const { id } = useParams();
   const router = useRouter();
+  const dmId = String(id);
 
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // -------------------------------
+  // 🔥 Real-time Enrichment WebSocket
+  const { event } = useDMEnrichmentWS(dmId);
+
+  // -------------------------------------
   // FETCH PROFILE
-  // -------------------------------
+  // -------------------------------------
   const fetchProfile = async () => {
     try {
-      const res = await axios.get(`/decision-maker/${id}`);
+      const res = await axios.get(`/decision-maker/${dmId}`);
       setData(res.data);
     } catch (err: any) {
       setError(err.response?.data?.detail || "Failed to load profile");
@@ -33,19 +39,22 @@ export default function DecisionMakerDetailPage() {
     }
   };
 
-  // Initial load
   useEffect(() => {
-    if (id) fetchProfile();
-  }, [id]);
+    fetchProfile();
+  }, [dmId]);
 
-  // ------------------------------------------
-  // 🔥 Auto refresh every 2.5 seconds
-  // ------------------------------------------
-  usePolling(() => fetchProfile(), 2500);
+  // Refresh DM detail when enrichment completes
+  useEffect(() => {
+    if (!event) return;
 
-  // -------------------------------
-  // VERIFY EMAIL BUTTON
-  // -------------------------------
+    if (event.event === "enrich_completed") {
+      fetchProfile();
+    }
+  }, [event]);
+
+  // -------------------------------------
+  // VERIFY EMAIL
+  // -------------------------------------
   const handleVerifyEmail = async () => {
     if (!data?.profile?.email) return;
 
@@ -62,9 +71,9 @@ export default function DecisionMakerDetailPage() {
     }
   };
 
-  // -------------------------------
+  // -------------------------------------
   // LOADING / ERROR
-  // -------------------------------
+  // -------------------------------------
   if (loading)
     return (
       <div className="flex justify-center py-20">
@@ -73,14 +82,11 @@ export default function DecisionMakerDetailPage() {
     );
 
   if (error) return <ErrorBanner message={error} />;
-
   if (!data) return null;
 
-  // -------------------------------
-  // NORMALIZED DATA
-  // -------------------------------
   const person = data.profile || {};
   const company = data.company || {};
+  const enrichment = data.enrichment || {};
 
   return (
     <div className="max-w-5xl mx-auto p-8 space-y-8">
@@ -101,11 +107,24 @@ export default function DecisionMakerDetailPage() {
 
         <div className="flex items-center gap-3">
           <Button onClick={() => router.push("/decision-maker")}>Back</Button>
-          <Button onClick={handleVerifyEmail} disabled={verifying} variant="primary">
-            {verifying ? "Verifying..." : "Verify Email"}
+          <DMEnrichButton dmId={dmId} />
+          <Button onClick={handleVerifyEmail} disabled={verifying} variant="secondary">
+            {verifying ? "Verifying…" : "Verify Email"}
           </Button>
         </div>
       </div>
+
+      {/* REAL-TIME ENRICHMENT STATUS */}
+      {event && (
+        <div className="p-3 rounded bg-blue-50 border text-blue-700 text-sm">
+          {event.event === "enrich_started" && "Enrichment started…"}
+          {event.event === "progress" && `Step: ${event.step || "Processing…"}`}
+          {event.event === "enrich_completed" && "Enrichment completed!"}
+          {event.event === "failed" && (
+            <span className="text-red-600">Error: {event.error}</span>
+          )}
+        </div>
+      )}
 
       {/* CONTACT CARD */}
       <Card className="p-6 space-y-4">
@@ -127,17 +146,14 @@ export default function DecisionMakerDetailPage() {
             <p className="text-xs text-gray-500">Email</p>
             <p className="font-medium">{person.email || "Not available"}</p>
           </div>
-
           <div>
             <p className="text-xs text-gray-500">Phone</p>
             <p className="font-medium">{person.phone || "Not available"}</p>
           </div>
-
           <div>
             <p className="text-xs text-gray-500">Seniority</p>
             <p className="font-medium">{person.seniority || "-"}</p>
           </div>
-
           <div>
             <p className="text-xs text-gray-500">Department</p>
             <p className="font-medium">{person.department || "-"}</p>
@@ -151,13 +167,11 @@ export default function DecisionMakerDetailPage() {
               LinkedIn
             </a>
           )}
-
           {person.twitter && (
             <a href={person.twitter} target="_blank" className="text-blue-600 hover:underline">
               Twitter
             </a>
           )}
-
           {person.github && (
             <a href={person.github} target="_blank" className="text-blue-600 hover:underline">
               GitHub
@@ -169,7 +183,6 @@ export default function DecisionMakerDetailPage() {
       {/* COMPANY CARD */}
       <Card className="p-6">
         <h2 className="text-lg font-semibold mb-4">Company Info</h2>
-
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <p><b>Name:</b> {company.name || "-"}</p>
           <p><b>Domain:</b> {company.domain || "-"}</p>
@@ -180,10 +193,9 @@ export default function DecisionMakerDetailPage() {
       </Card>
 
       {/* JOB HISTORY */}
-      {person.experience && person.experience.length > 0 && (
+      {person.experience?.length > 0 && (
         <Card className="p-6">
           <h2 className="text-lg font-semibold mb-4">Job History</h2>
-
           <div className="space-y-3">
             {person.experience.map((job: any, idx: number) => (
               <div key={idx} className="border-b pb-3">
@@ -197,6 +209,15 @@ export default function DecisionMakerDetailPage() {
           </div>
         </Card>
       )}
+
+      {/* ENRICHMENT JSON */}
+      <Card className="p-6">
+        <h2 className="text-lg font-semibold mb-4">Enrichment Data</h2>
+        <pre className="text-xs p-4 bg-gray-100 rounded overflow-auto">
+          {JSON.stringify(enrichment, null, 2)}
+        </pre>
+      </Card>
+
     </div>
   );
 }
