@@ -478,4 +478,8 @@ async def admin_apilogs_socket(ws: WebSocket):
         await api_logs_ws.disconnect(ws)
 from backend.app.routers.dm_ws import router as dm_ws_router
 app.include_router(dm_ws_router)
+from backend.app.routers.dm_analytics import router as dm_analytics_router
+
+app.include_router(dm_analytics_router)
+
 
