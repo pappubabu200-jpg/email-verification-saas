@@ -489,5 +489,8 @@ from backend.app.routers import verification_ws
 app.include_router(verification_ws.router)
 from backend.app.routers import ws_verification  # new file
 app.include_router(ws_verification.router)
+from backend.app.api import ws_verification
+
+app.include_router(ws_verification.router)
 
 
