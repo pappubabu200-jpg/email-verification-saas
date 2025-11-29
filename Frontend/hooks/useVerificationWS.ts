@@ -175,3 +175,80 @@ export function useVerificationWS(userId?: string | number | null): HookReturnTy
 }
 
 export default useVerificationWS;
+// Frontend/hooks/useVerificationWS.ts
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+type VerificationEvent =
+  | { event: "bulk_progress" | "bulk_completed" | "bulk_failed"; job_id?: string; processed?: number; total?: number; stats?: any; error?: string }
+  | { event: string; [k: string]: any };
+
+export function useVerificationWS(userId: string | number | null) {
+  const wsRef = useRef<WebSocket | null>(null);
+  const [connected, setConnected] = useState(false);
+  const [lastEvent, setLastEvent] = useState<VerificationEvent | null>(null);
+  const [events, setEvents] = useState<VerificationEvent[]>([]);
+
+  useEffect(() => {
+    if (!userId) return;
+
+    // Build WS URL — ensure NEXT_PUBLIC_WS_URL is set (e.g. wss://api.example.com)
+    const base = process.env.NEXT_PUBLIC_WS_URL || (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
+    const wsUrl = `${base.replace(/\/$/, "")}/ws/verification/${userId}`;
+
+    // Get token from local storage or cookie (whatever you use)
+    const token = localStorage.getItem("access_token") || "";
+
+    // Create websocket
+    const ws = new WebSocket(wsUrl, []);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      // send Authorization via subprotocol or query is not standard — we rely on header set by browser if using cookies
+      // But because browsers don't let us set handshake headers for WebSocket easily, you may want to send token as first message:
+      if (token) {
+        ws.send(JSON.stringify({ type: "auth.token", token }));
+      }
+      setConnected(true);
+    };
+
+    ws.onmessage = (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        setLastEvent(data);
+        setEvents((s) => {
+          const next = [data, ...s];
+          return next.slice(0, 200); // cap
+        });
+      } catch (err) {
+        console.warn("Invalid WS JSON", err);
+      }
+    };
+
+    ws.onerror = (err) => {
+      console.error("Verification WS error", err);
+    };
+
+    ws.onclose = () => {
+      setConnected(false);
+    };
+
+    // cleanup
+    return () => {
+      try {
+        ws.close();
+      } catch {}
+      wsRef.current = null;
+    };
+  }, [userId]);
+
+  return {
+    ws: wsRef.current,
+    connected,
+    lastEvent,
+    events,
+  };
+}
+
+export default useVerificationWS;
