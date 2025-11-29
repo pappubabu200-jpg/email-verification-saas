@@ -168,3 +168,112 @@ class _WSBroker:
 ws_broker = _WSBroker()
 
 
+# backend/app/services/ws_broker.py
+"""
+ws_broker: lightweight aioredis-backed Pub/Sub helper for Redis.
+
+Provides:
+- ws_broker.publish(channel: str, payload: dict) -> publish message (async)
+- ws_broker.subscribe(channel: str) -> async generator yielding dict messages
+- ws_broker.close() -> close redis connection(s)
+
+Notes:
+- Uses `redis.asyncio` (pip install redis>=4.2.0)
+- Messages are JSON-encoded strings on Redis channels.
+- subscribe() returns an async generator — remember to `async for msg in subscribe(...)`.
+"""
+
+from __future__ import annotations
+
+import os
+import asyncio
+import json
+import logging
+from typing import AsyncIterator, Optional
+
+import redis.asyncio as aioredis  # redis >=4.2
+logger = logging.getLogger(__name__)
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+# Single global client for publishing; new pubsub instances created for each subscriber
+_redis_client: Optional[aioredis.Redis] = None
+
+
+def _get_client() -> aioredis.Redis:
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+    return _redis_client
+
+
+class WSBroker:
+    def __init__(self):
+        self._client = _get_client()
+
+    async def publish(self, channel: str, payload: dict) -> int:
+        """
+        Publish JSON payload to a Redis channel.
+        Returns number of clients that received the message (Redis PUBLISH return).
+        """
+        try:
+            body = json.dumps(payload, default=str)
+            result = await self._client.publish(channel, body)
+            return int(result)
+        except Exception as e:
+            logger.exception("ws_broker.publish failed: %s", e)
+            return 0
+
+    async def subscribe(self, channel: str, *, buffer: int = 100) -> AsyncIterator[dict]:
+        """
+        Subscribe to a channel and yield JSON-decoded messages as dicts.
+        This returns an async generator. Example usage:
+            async for msg in ws_broker.subscribe(f"bulk:{job_id}"):
+                # msg is dict
+        IMPORTANT: Caller should cancel/close the generator to free resources.
+        """
+        pubsub = self._client.pubsub(ignore_subscribe_messages=True)
+        try:
+            await pubsub.subscribe(channel)
+            # pubsub.listen is an async iterator
+            async for item in pubsub.listen():
+                # item example: {'type': 'message', 'pattern': None, 'channel': 'bulk:123', 'data': '...'}
+                try:
+                    data = item.get("data")
+                    if isinstance(data, str):
+                        # decode JSON
+                        try:
+                            payload = json.loads(data)
+                        except Exception:
+                            # not JSON -> send raw
+                            payload = {"_raw": data}
+                    else:
+                        payload = {"_raw": data}
+                    yield payload
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Error handling pubsub message", exc_info=True)
+                    continue
+        finally:
+            try:
+                await pubsub.unsubscribe(channel)
+            except Exception:
+                logger.debug("Failed to unsubscribe from channel %s", channel)
+            try:
+                await pubsub.close()
+            except Exception:
+                pass
+
+    async def close(self):
+        global _redis_client
+        try:
+            if _redis_client:
+                await _redis_client.close()
+                _redis_client = None
+        except Exception:
+            logger.exception("ws_broker.close failed", exc_info=True)
+
+
+# module-level instance
+ws_broker = WSBroker()
+
