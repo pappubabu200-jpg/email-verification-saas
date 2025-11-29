@@ -159,3 +159,59 @@ export function useAdminWebhooksWS(opts?: { url?: string; maxEvents?: number }) 
   };
   }
 
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+export function useAdminMetricsWS() {
+  const [connected, setConnected] = useState(false);
+  const [data, setData] = useState<any>(null);
+
+  const wsRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    const token = localStorage.getItem("admin_token") || "";
+    const base =
+      process.env.NEXT_PUBLIC_WS_URL ||
+      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
+
+    const ws = new WebSocket(`${base}/ws/admin/metrics`, []);
+
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setConnected(true);
+      ws.send("ping");
+    };
+
+    ws.onmessage = (e) => {
+      try {
+        const json = JSON.parse(e.data);
+        setData(json);
+      } catch {
+        console.log("Invalid WS message", e.data);
+      }
+    };
+
+    ws.onclose = () => setConnected(false);
+
+    const ping = setInterval(() => {
+      ws.send("keepalive");
+    }, 3000);
+
+    return () => {
+      clearInterval(ping);
+      ws.close();
+    };
+  }, []);
+
+  return {
+    connected,
+    credits: data?.credits ?? null,
+    verifications: data?.verifications ?? [],
+    deliverability: data?.deliverability ?? null,
+    events: data?.events ?? [],
+    raw: data,
+  };
+}
+
