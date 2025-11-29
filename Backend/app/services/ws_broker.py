@@ -1,94 +1,111 @@
 """
-ws_broker: Redis Pub/Sub broker for real-time WebSocket fanout.
+ws_broker: Production-grade Redis Pub/Sub broker for real-time fanout.
 
 Architecture:
-Celery (sync) → asyncio.run(ws_broker.publish(...))
-FastAPI WS (async) → async for msg in ws_broker.subscribe(channel)
+    Celery Worker  →  publish_sync()  → Redis
+    FastAPI WS     →  subscribe()    → Redis → WebSocket
 
-Used for:
-- Bulk verification WS
-- Verification stream WS
-- Admin metrics WS
-- Decision Maker enrichment WS
+This file replaces ALL other ws_broker* files in the repo.
 """
 
 from __future__ import annotations
 
 import os
 import json
-import asyncio
 import logging
-from typing import AsyncIterator, Optional
+import asyncio
+from typing import Optional, AsyncIterator, Any
 
-import redis.asyncio as aioredis  # pip install redis>=4.3
+# Async Redis for WS subscribe & async publish
+import redis.asyncio as aioredis
+# Sync Redis for Celery publish (no event-loop issues)
+import redis as redis_sync
 
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------
+# -------------------------------------------------------------------
 # SETTINGS
-# --------------------------------------------------------------------
+# -------------------------------------------------------------------
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
-# global redis client (publish + create pubsubs)
-_redis_client: Optional[aioredis.Redis] = None
+# Singleton async client
+_async_client: Optional[aioredis.Redis] = None
 
 
-def _get_client() -> aioredis.Redis:
-    """Lazy init single Redis connection."""
-    global _redis_client
-    if _redis_client is None:
-        _redis_client = aioredis.from_url(
+# -------------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------------
+def _get_async_client() -> aioredis.Redis:
+    """
+    Create or return the global async Redis client.
+    Used by subscribe() and async publish().
+    """
+    global _async_client
+    if _async_client is None:
+        _async_client = aioredis.from_url(
             REDIS_URL,
             decode_responses=True,
             encoding="utf-8",
             health_check_interval=30,
         )
-    return _redis_client
+    return _async_client
 
 
-# --------------------------------------------------------------------
-# Main Broker Class
-# --------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Broker class
+# -------------------------------------------------------------------
 class WSBroker:
-    """
-    - publish(channel, payload)
-    - subscribe(channel) → async generator yielding messages
-    """
 
-    def __init__(self):
-        self.client = _get_client()
-
-    # --------------------------------------------------------------
-    # Publish a JSON message
-    # --------------------------------------------------------------
+    # -----------------------------
+    # ASYNC PUBLISH (API, WS, etc.)
+    # -----------------------------
     async def publish(self, channel: str, payload: dict) -> int:
         """
-        Publish a dict to Redis PubSub channel.
-        Returns number of subscribers (Redis publish return value).
+        Async publish for FastAPI & async services.
         """
         try:
-            msg = json.dumps(payload, default=str)
-            return int(await self.client.publish(channel, msg))
+            client = _get_async_client()
+            message = json.dumps(payload, default=str)
+            return int(await client.publish(channel, message))
         except Exception as e:
-            logger.exception(f"Redis publish failed ({channel}): {e}")
+            logger.exception("ws_broker.publish failed: %s", e)
             return 0
 
-    # --------------------------------------------------------------
-    # Subscribe generator for WebSocket router
-    # --------------------------------------------------------------
+    # -----------------------------
+    # SYNC PUBLISH (CELERY WORKERS)
+    # -----------------------------
+    def publish_sync(self, channel: str, payload: dict) -> int:
+        """
+        Sync publish for Celery tasks (NO asyncio.run needed).
+        This is extremely important because Celery runs in a
+        separate processes without async event loops.
+        """
+        try:
+            r = redis_sync.from_url(REDIS_URL, decode_responses=True)
+            msg = json.dumps(payload, default=str)
+            return int(r.publish(channel, msg))
+        except Exception as e:
+            logger.exception("ws_broker.publish_sync failed: %s", e)
+            return 0
+
+    # -----------------------------
+    # SUBSCRIBE (FastAPI WebSockets)
+    # -----------------------------
     async def subscribe(self, channel: str) -> AsyncIterator[dict]:
         """
-        Subscribe to a channel and stream messages forever until cancelled.
+        Async generator for Redis subscription.
+        Used inside FastAPI WebSocket routers.
 
-        Usage:
-            async for data in ws_broker.subscribe("bulk:123"):
-                await ws.send_json(data)
+        Example:
+            async for event in ws_broker.subscribe("bulk:123"):
+                await websocket.send_text(json.dumps(event))
         """
-        pubsub = self.client.pubsub(ignore_subscribe_messages=True)
+        client = _get_async_client()
+        pubsub = client.pubsub(ignore_subscribe_messages=True)
 
         try:
             await pubsub.subscribe(channel)
-            logger.info(f"[ws_broker] Subscribed to channel: {channel}")
+            logger.info(f"[Redis-WS] Subscribed → {channel}")
 
             async for message in pubsub.listen():
                 if message["type"] != "message":
@@ -104,40 +121,31 @@ class WSBroker:
                     yield {"_raw": raw}
 
         except asyncio.CancelledError:
-            logger.info(f"[ws_broker] Subscription cancelled for {channel}")
             raise
 
         except Exception as e:
-            logger.exception(f"Subscriber crashed on {channel}: {e}")
+            logger.exception("ws_broker.subscribe error (%s): %s", channel, e)
 
         finally:
             try:
                 await pubsub.unsubscribe(channel)
-            except:
+            except Exception:
                 pass
-
             try:
                 await pubsub.close()
-            except:
+            except Exception:
                 pass
 
-            logger.info(f"[ws_broker] Unsubscribed from: {channel}")
+            logger.info(f"[Redis-WS] Unsubscribed ← {channel}")
 
-    # --------------------------------------------------------------
-    # Explicit close (used only on shutdown)
-    # --------------------------------------------------------------
+    # -----------------------------
+    # CLEANUP
+    # -----------------------------
     async def close(self):
-        """Close global Redis connection."""
-        global _redis_client
+        global _async_client
         try:
-            if _redis_client:
-                await _redis_client.close()
-                _redis_client = None
-        except Exception as e:
-            logger.exception(f"ws_broker.close failed: {e}")
-
-
-# --------------------------------------------------------------------
-# GLOBAL SINGLETON
-# --------------------------------------------------------------------
-ws_broker = WSBroker()
+            if _async_client:
+                await _async_client.close()
+                _async_client = None
+        except Exception:
+            logger.exception("ws_broker.close failed")
